@@ -5,3 +5,5 @@ dist/
 coverage/
 *.log
 npm-debug.log*
+
+HANDOFF-*.md
