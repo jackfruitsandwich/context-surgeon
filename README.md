@@ -1,13 +1,13 @@
 # context-surgeon
 
-Give AI agents the ability to edit their own context window.
+Give your agents the ability to edit their own context window.
 
 <!-- TODO: Replace with actual demo GIF -->
 <!-- ![Demo](demo.gif) -->
 
 ---
 
-Your AI coding agent accumulates stale file reads, web fetches, and bash outputs as it works. Each one sits in the context window forever, eating tokens, slowing responses, and eventually triggering crude auto-compaction that throws away things you still need.
+Your AI agent accumulates stale file reads, web fetches, and bash outputs as it works. Each one sits in the context window forever, eating tokens, slowing responses, and eventually triggering crude auto-compaction that throws away things you still need.
 
 **context-surgeon** gives the agent three surgical tools — **evict**, **replace**, and **restore** — so it can manage its own memory. The agent decides what to keep and what to discard. Token usage drops in real-time. Conversations run longer. The agent stays focused.
 
@@ -128,9 +128,7 @@ context-surgeon/
 
 - **Subagent ID overlap**: In Claude Code, subagent messages share the ID namespace with the parent. Evicting a parent message may affect a subagent message with the same ID. Working on a fix.
 - **Claude Code `/` commands**: Some slash commands may interact unexpectedly with the proxy. If you hit issues, restart the session.
-- **Codex sandbox**: The first `context-surgeon` command in a Codex session may fail due to sandbox restrictions. The agent retries outside the sandbox automatically. Approve "always allow context-surgeon" when prompted.
-- **Session state is ephemeral**: Eviction directives are lost when the session ends. This is by design for the MVP.
-- **WebSocket fallback delay**: Codex prefers WebSocket for API calls. The proxy rejects WebSocket to intercept requests via HTTP, causing a ~5-8 second delay on the first request of each session.
+- **Session state is ephemeral**: Eviction directives are lost when the session ends
 
 ## How is this different from auto-compaction?
 
