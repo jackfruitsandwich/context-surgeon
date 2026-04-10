@@ -1,0 +1,25 @@
+{
+  "name": "context-surgeon",
+  "version": "0.1.0",
+  "description": "Give AI agents the ability to edit their own context window",
+  "type": "module",
+  "bin": {
+    "context-surgeon": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "rm -rf dist && node --no-maglev ./node_modules/typescript/bin/tsc -p tsconfig.json --pretty false && chmod +x dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
