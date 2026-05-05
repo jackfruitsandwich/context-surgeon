@@ -2,6 +2,7 @@ import http from "node:http";
 import net from "node:net";
 import { URL } from "node:url";
 import type { Directive } from "../context/types.js";
+import type { SkeletonItem } from "../context/skeleton.js";
 import { DirectiveStore } from "../store/directive-store.js";
 import { ShadowStore } from "../store/shadow-store.js";
 import { handleControl } from "../api/control.js";
@@ -88,6 +89,7 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
   let latestExactPromptTokens: number | null = null;
   let latestPromptTokens: number | null = null;
   let previousSkeleton: string[] | null = null;
+  let currentSkeletonItems: SkeletonItem[] | null = null;
 
   const handlerConfig: HandlerConfig = {
     directiveStore,
@@ -101,6 +103,9 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
     getPreviousSkeleton: () => previousSkeleton,
     setPreviousSkeleton: (skeleton) => {
       previousSkeleton = [...skeleton];
+    },
+    setCurrentSkeletonItems: (items) => {
+      currentSkeletonItems = items.map((item) => ({ ...item }));
     },
   };
 
@@ -117,7 +122,8 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
           directiveStore,
           shadowStore,
           latestPromptTokens,
-          opts.maxTokens
+          opts.maxTokens,
+          currentSkeletonItems
         );
         return;
       }

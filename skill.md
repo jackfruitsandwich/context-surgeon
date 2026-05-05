@@ -14,6 +14,18 @@ You have access to `context-surgeon` via your shell tool to manage your own cont
 # Evict — replace content with [evicted] to free space
 context-surgeon evict <id>
 
+# Evict several targets in one command
+context-surgeon evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2
+
+# Selector forms
+context-surgeon evict --turn 3              # whole turn 3
+context-surgeon evict --turn 3..7           # whole turns 3 through 7
+context-surgeon evict --user 3              # user message 3
+context-surgeon evict --assistant 3         # all assistant messages in turn 3
+context-surgeon evict --assistant 3.2,3.4   # exact assistant messages
+context-surgeon evict --tool-result 3       # all tool results in turn 3
+context-surgeon evict --tool-result 3.1,3.3 # exact tool results
+
 # Evict only media blocks of one type inside a unit
 context-surgeon evict <id> --media image
 context-surgeon evict <id> --media document
@@ -29,6 +41,10 @@ context-surgeon restore <id>
 
 # Status — show current context surgery state
 context-surgeon status
+
+# Skeleton — show the current thread structure without message bodies
+context-surgeon skeleton
+context-surgeon skeleton --json
 ```
 
 ### How to reference objects
@@ -48,7 +64,13 @@ When editing a tool result, prefer the full tool-result ID such as
 `[tool result 4.1]`. If you pass only the bare short ID like `4.1`,  
 `context-surgeon` treats it as shorthand for the tool result.
 
-Never type or reproduce message ID labels yourself, anywhere in your response. Forbidden examples: `[assistant message N.M]` , `[user message N]` , `[tool call N.M]` , `[tool result N.M]` . These labels are inserted automatically by context-surgeon programmatically for internal referencing only. Do not generate `[assistant message N.M]` tokens at the start of your message. It will look like you did in previous messages and you will want to start generating them, but do not. These tokens are added into your context window so you can refer to messages by id, they are not added by you. You never generate those tokens yourself even if it looks like they are part of every message. Just how the user never writes `[user message N]` at the start of every prompt. 
+For bulk cleanup, prefer selector flags over many separate shell calls. Example:
+
+```bash
+context-surgeon evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2
+```
+
+This records separate directives for each selected target. Whole-turn selectors include the user message, assistant messages, tool calls, and tool results in that turn. Use `--dry-run` to print the canonical targets without applying them.
 
 ### When to use context surgery
 
@@ -62,7 +84,9 @@ Never type or reproduce message ID labels yourself, anywhere in your response. F
 - Prefer `evict` over `replace` for maximum token savings — evicted content can still be restored
 - If a message or tool result contains useful text plus bulky media, prefer media-only eviction with `--media image` or `--media document` instead of evicting the whole unit
 - Use `--occurrences 1,3` only when you want specific images or documents of the same type removed from a single unit
+- Use selector flags such as `--turn`, `--assistant`, and `--tool-result` when you need to evict many targets at once
 - Do not evict tool calls
+- Use `context-surgeon skeleton` when you need to see which user messages, assistant messages, and tool pairs remain visible after surgery
 - When using `replace`, write a concise summary that captures the key facts you'll need later
 - Don't evict user messages unless they contain large pasted content — user intent is always important
 - Media-only eviction is reliable for Claude media units and Codex user-image messages. Do not rely on it yet for Codex tool results that contain images.

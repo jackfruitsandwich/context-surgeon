@@ -116,6 +116,64 @@ describe("Full pipeline", () => {
     expect(shadow.tokenEstimate).toBeGreaterThan(0);
   });
 
+  it("applies whole-turn selector directives to exact item ids", () => {
+    const ctx = adapter.parse(loadFixture());
+    assignIds(ctx.items);
+
+    const dirStore = new DirectiveStore();
+    const shadowStore = new ShadowStore();
+
+    dirStore.set("turn 1", { type: "evict" });
+    applyDirectives(ctx, dirStore, shadowStore, {
+      textCharStats: computeTextCharStats(ctx),
+      latestExactPromptTokens: 1000,
+    });
+
+    const firstUser = ctx.items[1];
+    if (firstUser.kind === "user-message") {
+      expect(firstUser.content).toEqual([{ type: "text", text: "[evicted]" }]);
+    }
+
+    const firstAssistant = ctx.items[2];
+    if (firstAssistant.kind === "assistant-message") {
+      expect(firstAssistant.content).toEqual([
+        { type: "text", text: "[evicted]" },
+      ]);
+    }
+
+    const toolCall = ctx.items[3];
+    if (toolCall.kind === "tool-call") {
+      expect(toolCall.arguments).toBe("{}");
+    }
+
+    const toolResult = ctx.items[4];
+    if (toolResult.kind === "tool-result") {
+      expect(toolResult.output).toBe("[evicted]");
+    }
+
+    const secondAssistant = ctx.items[5];
+    if (secondAssistant.kind === "assistant-message") {
+      expect(secondAssistant.content).toEqual([
+        { type: "text", text: "[evicted]" },
+      ]);
+    }
+
+    const secondUser = ctx.items[6];
+    if (secondUser.kind === "user-message") {
+      expect(secondUser.content).not.toEqual([
+        { type: "text", text: "[evicted]" },
+      ]);
+    }
+
+    expect(shadowStore.has("turn 1")).toBe(false);
+    expect(shadowStore.has("user message 1")).toBe(true);
+    expect(shadowStore.has("assistant message 1.1")).toBe(true);
+    expect(shadowStore.has("tool call 1.1")).toBe(true);
+    expect(shadowStore.has("tool result 1.1")).toBe(true);
+    expect(shadowStore.has("assistant message 1.2")).toBe(true);
+    expect(shadowStore.has("user message 2")).toBe(false);
+  });
+
   it("replaces a tool result with a summary", () => {
     const ctx = adapter.parse(loadFixture());
     assignIds(ctx.items);

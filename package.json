@@ -12,6 +12,25 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "files": [
+    "dist",
+    "skill.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "context-window",
+    "codex",
+    "claude",
+    "llm",
+    "proxy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jackfruitsandwich/context-surgeon.git"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"

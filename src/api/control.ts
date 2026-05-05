@@ -3,15 +3,28 @@ import type { DirectiveStore } from "../store/directive-store.js";
 import type { ShadowStore } from "../store/shadow-store.js";
 import type { Directive, MediaType } from "../context/types.js";
 import {
+  annotateSkeletonItems,
+  type SkeletonItem,
+  type SkeletonRow,
+} from "../context/skeleton.js";
+import {
   buildStatusSummary,
   makeStatusLine,
 } from "../context/status.js";
+import { directiveKeyMatchesItemId } from "../context/directive-targets.js";
 
 type StatusDirectiveRow = {
   id: string;
   action: string;
   tokens: number | null;
   tokenState: "known" | "pending" | "unknown";
+};
+
+type SkeletonResponse = {
+  summary: {
+    statusLine: string;
+  };
+  items: SkeletonRow[];
 };
 
 function describeDirectiveAction(directive: Directive): string {
@@ -51,6 +64,38 @@ function normalizeOccurrences(value: unknown): number[] | undefined {
   return [...new Set(occurrences)].sort((a, b) => a - b);
 }
 
+function getMatchingShadowIds(
+  id: string,
+  shadowStore: ShadowStore
+): string[] {
+  return [...shadowStore.getAll().keys()].filter((shadowId) =>
+    directiveKeyMatchesItemId(id, shadowId)
+  );
+}
+
+function getDirectiveTokenState(
+  id: string,
+  shadowStore: ShadowStore
+): Pick<StatusDirectiveRow, "tokens" | "tokenState"> {
+  const matchingShadows = [...shadowStore.getAll()].filter(([shadowId]) =>
+    directiveKeyMatchesItemId(id, shadowId)
+  );
+
+  if (matchingShadows.length === 0) {
+    return { tokens: null, tokenState: "pending" };
+  }
+
+  let totalTokens = 0;
+  for (const [, shadow] of matchingShadows) {
+    if (shadow.tokenEstimate === null) {
+      return { tokens: null, tokenState: "unknown" };
+    }
+    totalTokens += shadow.tokenEstimate;
+  }
+
+  return { tokens: totalTokens, tokenState: "known" };
+}
+
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -75,7 +120,8 @@ export async function handleControl(
   directiveStore: DirectiveStore,
   shadowStore: ShadowStore,
   latestPromptTokens: number | null,
-  maxTokens: number
+  maxTokens: number,
+  currentSkeletonItems: SkeletonItem[] | null = null
 ): Promise<void> {
   const url = req.url || "";
   const method = req.method || "GET";
@@ -136,7 +182,8 @@ export async function handleControl(
       jsonResponse(res, 400, { ok: false, error: "Missing id" });
       return;
     }
-    if (!shadowStore.has(body.id)) {
+    const matchingShadowIds = getMatchingShadowIds(body.id, shadowStore);
+    if (!directiveStore.has(body.id) && matchingShadowIds.length === 0) {
       jsonResponse(res, 400, {
         ok: false,
         error: `No shadow entry for ${body.id}. Cannot restore.`,
@@ -146,7 +193,9 @@ export async function handleControl(
     // Restore is pure bookkeeping. The next request carries the original
     // transcript content again once the directive is gone.
     directiveStore.delete(body.id);
-    shadowStore.delete(body.id);
+    for (const shadowId of matchingShadowIds) {
+      shadowStore.delete(shadowId);
+    }
     jsonResponse(res, 200, {
       ok: true,
       message: `Restored: ${body.id}. Content will reappear on next API call.`,
@@ -157,16 +206,11 @@ export async function handleControl(
   if (method === "GET" && url === "/_control/status") {
     const activeDirectives: StatusDirectiveRow[] = [];
     for (const [id, directive] of directiveStore.getAll()) {
-      const shadow = shadowStore.get(id);
+      const tokenState = getDirectiveTokenState(id, shadowStore);
       activeDirectives.push({
         id,
         action: describeDirectiveAction(directive),
-        tokens: shadow?.tokenEstimate ?? null,
-        tokenState: shadow
-          ? shadow.tokenEstimate === null
-            ? "unknown"
-            : "known"
-          : "pending",
+        ...tokenState,
       });
     }
 
@@ -185,6 +229,27 @@ export async function handleControl(
       },
       activeDirectives,
     });
+    return;
+  }
+
+  if (method === "GET" && url === "/_control/skeleton") {
+    const summary = buildStatusSummary(
+      latestPromptTokens,
+      shadowStore,
+      maxTokens
+    );
+    const body: SkeletonResponse = {
+      summary: {
+        statusLine: makeStatusLine(summary),
+      },
+      items: annotateSkeletonItems(
+        currentSkeletonItems ?? [],
+        directiveStore,
+        shadowStore
+      ),
+    };
+
+    jsonResponse(res, 200, body);
     return;
   }
 
