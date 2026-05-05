@@ -11,11 +11,7 @@ import {
   estimateTokensByTextShare,
   type TextCharStats,
 } from "./status.js";
-
-function getItemLookupId(item: ContextItem): string {
-  // All items use their assigned id for directive lookup
-  return item.id;
-}
+import { lookupDirectiveForItem } from "./directive-targets.js";
 
 function makeMediaPlaceholder(mediaType: MediaType): string {
   return mediaType === "image" ? "[image evicted]" : "[document evicted]";
@@ -109,9 +105,11 @@ export function applyDirectives(
   }
 ): void {
   for (const item of ctx.items) {
-    const lookupId = getItemLookupId(item);
-    const directive = directiveStore.get(lookupId);
-    if (!directive) continue;
+    const match = lookupDirectiveForItem(item, directiveStore);
+    if (!match) continue;
+
+    const lookupId = item.id;
+    const directive = match.directive;
 
     if (directive.type === "evict") {
       if (directive.mediaType) {
@@ -176,7 +174,7 @@ export function applyRestore(
   if (!shadow) return false;
 
   for (const item of ctx.items) {
-    const lookupId = getItemLookupId(item);
+    const lookupId = item.id;
     if (lookupId !== id) continue;
 
     // Restore original content

@@ -21,8 +21,10 @@ import {
   estimateTokensFromChars,
   type StatusSummary,
 } from "../context/status.js";
+import { buildSkeletonItems, type SkeletonItem } from "../context/skeleton.js";
 import { AnthropicMessagesAdapter } from "../adapters/anthropic-messages.js";
 import { OpenAIResponsesAdapter } from "../adapters/openai-responses.js";
+import { directiveKeyMatchesItemId } from "../context/directive-targets.js";
 
 /** Snapshot passed to optional hooks (e.g. tests). */
 export type DebugSnapshotInput = {
@@ -50,6 +52,7 @@ export type HandlerConfig = {
   getLatestExactPromptTokens: () => number | null;
   getPreviousSkeleton: () => string[] | null;
   setPreviousSkeleton: (skeleton: string[]) => void;
+  setCurrentSkeletonItems?: (items: SkeletonItem[]) => void;
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void;
 };
 
@@ -262,7 +265,10 @@ function pruneMissingDirectiveState(
   shadowStore: ShadowStore
 ): void {
   for (const [id] of directiveStore.getAll()) {
-    if (!currentIds.has(id)) {
+    const stillMatchesCurrentContext = [...currentIds].some((currentId) =>
+      directiveKeyMatchesItemId(id, currentId)
+    );
+    if (!stillMatchesCurrentContext) {
       directiveStore.delete(id);
       shadowStore.delete(id);
     }
@@ -357,6 +363,7 @@ export async function transformRequest(
   // Pipeline:
   // 1. Assign IDs
   assignIds(ctx.items);
+  config.setCurrentSkeletonItems?.(buildSkeletonItems(ctx.items));
 
   const currentIds = new Set(ctx.items.map((item) => item.id));
   if (historyTransition === "truncate") {
