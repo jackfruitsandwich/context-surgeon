@@ -2,6 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import { createUsageTap, type ProviderFormat } from "./usage.js";
+import { ResponsesToChatTranslator } from "./responses-to-chat.js";
 
 export type UpstreamRequestOptions = {
   url: string;
@@ -10,6 +11,7 @@ export type UpstreamRequestOptions = {
   body: Buffer;
   format?: ProviderFormat;
   onPromptTokens?: (tokens: number) => void;
+  translateResponse?: "responses-to-chat";
 };
 
 export function forwardToUpstream(
@@ -58,12 +60,21 @@ export function forwardToUpstream(
           console.error(
             `[debug] ← ${upstreamRes.statusCode} ${upstreamRes.headers["content-type"] ?? "?"} from ${parsed.hostname}${parsed.pathname}`
           );
-          let logged = 0;
+          let bytes = 0;
+          let tail = "";
           upstreamRes.on("data", (chunk: Buffer) => {
-            if (logged < 2) {
-              logged += 1;
+            bytes += chunk.length;
+            tail = (tail + chunk.toString("utf-8")).slice(-400);
+          });
+          upstreamRes.on("end", () => {
+            console.error(
+              `[debug] ← stream end: ${bytes} bytes, tail[..400]: ${tail.replace(/\n/g, "\\n")}`
+            );
+          });
+          clientRes.on("close", () => {
+            if (!clientRes.writableEnded) {
               console.error(
-                `[debug] ← chunk[0..300]: ${chunk.subarray(0, 300).toString("utf-8")}`
+                `[debug] ← CLIENT ABORTED after ${bytes} bytes from upstream`
               );
             }
           });
@@ -71,7 +82,23 @@ export function forwardToUpstream(
         if (usageTap) {
           upstreamRes.on("data", (chunk: Buffer) => usageTap.onChunk(chunk));
         }
-        upstreamRes.pipe(clientRes);
+        const shouldTranslate =
+          opts.translateResponse === "responses-to-chat" &&
+          (upstreamRes.headers["content-type"] ?? "").includes("event-stream");
+        if (shouldTranslate) {
+          const translator = new ResponsesToChatTranslator();
+          upstreamRes.on("data", (chunk: Buffer) => {
+            const translated = translator.translate(chunk);
+            if (translated.length > 0) {
+              clientRes.write(translated);
+            }
+          });
+          upstreamRes.on("end", () => {
+            if (!clientRes.writableEnded) clientRes.end();
+          });
+        } else {
+          upstreamRes.pipe(clientRes);
+        }
         upstreamRes.on("end", () => {
           usageTap?.onEnd();
           resolve();

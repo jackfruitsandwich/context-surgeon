@@ -205,6 +205,7 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
             headers: result.headers,
             body: result.body,
             format: result.format,
+            translateResponse: result.translateResponse,
             onPromptTokens: (tokens) => {
               if (!result.updatesConversationState) {
                 return;

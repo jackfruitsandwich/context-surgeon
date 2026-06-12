@@ -65,6 +65,7 @@ type TransformResult = {
   format: SupportedFormat;
   statusSummary: StatusSummary;
   updatesConversationState: boolean;
+  translateResponse?: "responses-to-chat";
 };
 
 type SupportedFormat =
@@ -427,6 +428,7 @@ export async function transformRequest(
   let format = detectFormat(path);
   if (!format) return null;
   let effectivePath = path;
+  let translateResponse: "responses-to-chat" | undefined;
 
   // Try to decompress if needed
   let bodyBuf: Buffer;
@@ -454,6 +456,9 @@ export async function transformRequest(
   ) {
     format = "openai-responses";
     effectivePath = "/v1/responses";
+    // Cursor parses only chat-completions SSE, so the Responses stream must
+    // be translated back on the way out.
+    translateResponse = "responses-to-chat";
 
     // Translate chat-completions-only params the Responses endpoint rejects.
     delete json.stream_options; // Responses streams always include usage
@@ -560,5 +565,6 @@ export async function transformRequest(
     format,
     statusSummary,
     updatesConversationState: shouldUpdateConversationState,
+    translateResponse,
   };
 }
