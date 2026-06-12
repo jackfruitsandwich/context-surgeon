@@ -454,6 +454,17 @@ export async function transformRequest(
   ) {
     format = "openai-responses";
     effectivePath = "/v1/responses";
+
+    // Translate chat-completions-only params the Responses endpoint rejects.
+    delete json.stream_options; // Responses streams always include usage
+    delete json.logit_bias;
+    delete json.presence_penalty;
+    delete json.frequency_penalty;
+    delete json.n;
+    if (json.max_tokens !== undefined && json.max_output_tokens === undefined) {
+      json.max_output_tokens = json.max_tokens;
+    }
+    delete json.max_tokens;
   }
 
   if (!canTransformRequest(json, format)) {

@@ -259,6 +259,34 @@ describe("transformRequest for chat completions", () => {
     expect(parsed.messages).toBeUndefined();
   });
 
+  it("strips chat-completions-only params when rerouting to Responses", async () => {
+    const body = {
+      model: "gpt-5.5",
+      stream: true,
+      stream_options: { include_usage: true },
+      max_tokens: 4096,
+      presence_penalty: 0,
+      input: [{ role: "user", content: "hi" }],
+    };
+
+    const result = await transformRequest(
+      "/v1/chat/completions",
+      Buffer.from(JSON.stringify(body), "utf-8"),
+      { "content-type": "application/json" },
+      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+    );
+
+    const parsed = JSON.parse(result!.body.toString("utf-8")) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.stream_options).toBeUndefined();
+    expect(parsed.presence_penalty).toBeUndefined();
+    expect(parsed.max_tokens).toBeUndefined();
+    expect(parsed.max_output_tokens).toBe(4096);
+    expect(parsed.stream).toBe(true);
+  });
+
   it("parses Cursor's typeless string-content input items into real messages", async () => {
     const body = {
       model: "gpt-5.5",

@@ -54,6 +54,20 @@ export function forwardToUpstream(
         }
 
         clientRes.writeHead(upstreamRes.statusCode || 502, responseHeaders);
+        if (process.env.CONTEXT_SURGEON_DEBUG) {
+          console.error(
+            `[debug] ← ${upstreamRes.statusCode} ${upstreamRes.headers["content-type"] ?? "?"} from ${parsed.hostname}${parsed.pathname}`
+          );
+          let logged = 0;
+          upstreamRes.on("data", (chunk: Buffer) => {
+            if (logged < 2) {
+              logged += 1;
+              console.error(
+                `[debug] ← chunk[0..300]: ${chunk.subarray(0, 300).toString("utf-8")}`
+              );
+            }
+          });
+        }
         if (usageTap) {
           upstreamRes.on("data", (chunk: Buffer) => usageTap.onChunk(chunk));
         }
