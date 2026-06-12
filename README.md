@@ -27,6 +27,9 @@ Requires Node.js 22+.
 # Wrap your CLI — everything else stays the same
 context-surgeon codex
 context-surgeon claude
+
+# Or expose the proxy to Cursor IDE (BYOK mode)
+context-surgeon cursor
 ```
 
 That's it. The agent reads its instructions automatically and gains context surgery abilities. You use your CLI exactly as before.
@@ -105,7 +108,27 @@ A status line appears at the end of each user message:
 |----------|--------|
 | Codex CLI (subscription + API key) | Supported |
 | Claude Code | Supported |
+| Cursor IDE (custom API key) | Experimental |
 | Codex desktop app | Not yet (requires daemon approach) |
+
+### Cursor IDE setup
+
+Cursor routes all model calls through its own backend — even with your own API
+key — so the proxy must be reachable from the public internet. `context-surgeon
+cursor` starts the proxy plus a [cloudflared quick
+tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+(install with `brew install cloudflared`) and prints a public URL:
+
+1. Run `context-surgeon cursor`
+2. In Cursor: Settings → Models → API Keys → enable **OpenAI API Key** and paste your key
+3. Enable **Override OpenAI Base URL** and paste the printed tunnel URL
+4. Click Verify, pick an OpenAI model, and chat
+
+The agent runs `context-surgeon evict/replace/restore/status` through the
+integrated terminal as usual. Caveats: custom API keys are billed to your
+OpenAI account, only work with chat models (Tab stays on Cursor's models), and
+agent mode support varies. Your prompts transit the tunnel; the tunnel URL is
+unguessable but treat it as sensitive.
 
 ## Architecture
 

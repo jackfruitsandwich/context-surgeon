@@ -76,10 +76,10 @@ function userConfigHasTopLevelModelProvider(): boolean {
   return false;
 }
 
-export async function launch(
-  target: Target,
-  extraArgs: string[]
-): Promise<void> {
+async function startConfiguredProxy(): Promise<{
+  proxy: Awaited<ReturnType<typeof startProxy>>;
+  portFile: string;
+}> {
   const skillMarkdown = loadSkillMarkdown();
 
   const maxTokens = parseInt(
@@ -109,11 +109,114 @@ export async function launch(
     upstreamChatGPT,
   });
 
-  // Write port to a well-known file so CLI commands can find it
   const portDir = join(homedir(), ".context-surgeon");
   mkdirSync(portDir, { recursive: true });
   const portFile = join(portDir, "port");
   writeFileSync(portFile, String(proxy.port));
+
+  return { proxy, portFile };
+}
+
+/**
+ * Cursor mode: Cursor routes BYOK requests through its own backend, so the
+ * proxy must be reachable from the public internet. We expose it through a
+ * cloudflared quick tunnel and the user pastes the tunnel URL into
+ * Cursor → Settings → Models → API Keys → "Override OpenAI Base URL".
+ */
+export async function launchCursor(extraArgs: string[]): Promise<void> {
+  const { proxy, portFile } = await startConfiguredProxy();
+  const localBase = `http://127.0.0.1:${proxy.port}/v1`;
+  const noTunnel = extraArgs.includes("--no-tunnel");
+
+  function shutdown(code: number): void {
+    const summary = proxy.getShutdownDirectiveSummary();
+    if (summary) {
+      console.error(`\n${summary}`);
+    }
+    try { unlinkSync(portFile); } catch {}
+    proxy.close();
+    process.exit(code);
+  }
+
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => shutdown(0));
+  }
+
+  if (noTunnel) {
+    printCursorInstructions(localBase, false);
+    return; // keep running until Ctrl-C (proxy server holds the event loop)
+  }
+
+  const { spawn } = await import("node:child_process");
+  const tunnel = spawn(
+    "cloudflared",
+    ["tunnel", "--url", `http://127.0.0.1:${proxy.port}`],
+    { stdio: ["ignore", "pipe", "pipe"] }
+  );
+
+  let printed = false;
+  const onTunnelOutput = (chunk: Buffer): void => {
+    if (printed) return;
+    const match = chunk
+      .toString("utf-8")
+      .match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (match) {
+      printed = true;
+      printCursorInstructions(`${match[0]}/v1`, true);
+    }
+  };
+  tunnel.stdout.on("data", onTunnelOutput);
+  tunnel.stderr.on("data", onTunnelOutput);
+
+  tunnel.on("error", () => {
+    console.error(
+      `[context-surgeon] cloudflared not found — install it to expose the proxy publicly:
+  brew install cloudflared          (macOS)
+  https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+Cursor's backend makes the model requests, so it cannot reach localhost directly.
+Falling back to local-only mode (works for tools that run on this machine):`
+    );
+    printCursorInstructions(localBase, false);
+  });
+
+  tunnel.on("exit", (code) => {
+    if (printed) {
+      console.error(`[context-surgeon] Tunnel exited (code ${code ?? 0}), shutting down`);
+      shutdown(code ?? 0);
+    }
+  });
+
+  process.on("exit", () => {
+    try { tunnel.kill(); } catch {}
+  });
+}
+
+function printCursorInstructions(baseUrl: string, isPublic: boolean): void {
+  console.error(`
+[context-surgeon] Proxy ready for Cursor.
+
+  1. Open Cursor → Settings → Cursor Settings → Models → API Keys
+  2. Enable "OpenAI API Key" and paste your OpenAI API key
+  3. Enable "Override OpenAI Base URL" and set it to:
+
+       ${baseUrl}
+
+  4. Click "Verify" — Cursor's backend will route model calls through this proxy
+  5. Chat away. The agent can run context-surgeon evict/replace/restore/status
+     from the integrated terminal.
+${isPublic ? "" : `
+  NOTE: this URL is local-only. Cursor's backend cannot reach it — install
+  cloudflared for a public tunnel, or use this mode for local testing only.
+`}
+  Ctrl-C to stop.`);
+}
+
+export async function launch(
+  target: Target,
+  extraArgs: string[]
+): Promise<void> {
+  const { proxy, portFile } = await startConfiguredProxy();
 
   const childEnv = { ...process.env };
   childEnv.CONTEXT_SURGEON_PORT = String(proxy.port);

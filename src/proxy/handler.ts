@@ -25,13 +25,14 @@ import {
 import { buildSkeletonItems, type SkeletonItem } from "../context/skeleton.js";
 import { AnthropicMessagesAdapter } from "../adapters/anthropic-messages.js";
 import { OpenAIResponsesAdapter } from "../adapters/openai-responses.js";
+import { OpenAIChatCompletionsAdapter } from "../adapters/openai-chat-completions.js";
 import { directiveKeyMatchesItemId } from "../context/directive-targets.js";
 
 /** Snapshot passed to optional hooks (e.g. tests). */
 export type DebugSnapshotInput = {
   timestamp: string;
   path: string;
-  format: "openai-responses" | "anthropic-messages";
+  format: SupportedFormat;
   upstreamUrl: string;
   systemPrompt: string;
   items: ContextItem[];
@@ -66,10 +67,14 @@ type TransformResult = {
   updatesConversationState: boolean;
 };
 
-type SupportedFormat = "openai-responses" | "anthropic-messages";
+type SupportedFormat =
+  | "openai-responses"
+  | "anthropic-messages"
+  | "openai-chat-completions";
 
 const openaiAdapter = new OpenAIResponsesAdapter();
 const anthropicAdapter = new AnthropicMessagesAdapter();
+const chatCompletionsAdapter = new OpenAIChatCompletionsAdapter();
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
 
 type ZlibWithOptionalZstd = typeof zlib & {
@@ -86,11 +91,14 @@ function detectFormat(path: string): SupportedFormat | null {
   if (path.includes("/codex/responses")) return "openai-responses"; // ChatGPT backend uses same format
   if (path.startsWith("/anthropic/v1/messages")) return "anthropic-messages";
   if (path.startsWith("/v1/messages")) return "anthropic-messages"; // legacy root path
+  if (path.startsWith("/v1/chat/completions")) return "openai-chat-completions"; // Cursor BYOK base URL override
+  if (path.startsWith("/chat/completions")) return "openai-chat-completions"; // base URL entered without /v1
   return null;
 }
 
 function getAdapter(format: SupportedFormat): FormatAdapter {
   if (format === "openai-responses") return openaiAdapter;
+  if (format === "openai-chat-completions") return chatCompletionsAdapter;
   return anthropicAdapter;
 }
 
@@ -110,9 +118,9 @@ function getUpstreamUrl(
     const pathSuffix = path.replace(/^\/backend-api/, "");
     return base + pathSuffix;
   }
-  if (format === "openai-responses") {
+  if (format === "openai-responses" || format === "openai-chat-completions") {
     const base = config.upstreamOpenAI.replace(/\/+$/, "");
-    const pathSuffix = path.replace(/^\/v1/, "");
+    const pathSuffix = path.startsWith("/v1") ? path.replace(/^\/v1/, "") : path;
     return base + pathSuffix;
   }
   if (format === "anthropic-messages") {
@@ -129,7 +137,7 @@ function canTransformRequest(
   if (format === "openai-responses") {
     return Array.isArray(json.input);
   }
-  return Array.isArray(json.messages);
+  return Array.isArray(json.messages); // anthropic-messages and openai-chat-completions
 }
 
 async function decompressBody(

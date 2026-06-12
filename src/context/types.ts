@@ -5,7 +5,7 @@ export type ContextObject = {
   systemRaw?: unknown;
   items: ContextItem[];
   rawRequest: Record<string, unknown>;
-  format: "openai-responses" | "anthropic-messages";
+  format: "openai-responses" | "anthropic-messages" | "openai-chat-completions";
 };
 
 export type BlockLocation = {
@@ -63,6 +63,7 @@ export type OtherItem = {
   kind: "other";
   id: string;
   raw: unknown;
+  messageIndex?: number;
 };
 
 export type ContentBlock =

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { launch } from "./cli/launch.js";
+import { launch, launchCursor } from "./cli/launch.js";
 import { runCommand } from "./cli/commands.js";
 
 const packageJson = JSON.parse(
@@ -35,12 +35,19 @@ if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) 
       console.error("Error:", err instanceof Error ? err.message : err);
       process.exit(1);
     });
+  } else if (target === "cursor") {
+    launchCursor(extraArgs).catch((err) => {
+      console.error("Error:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
   } else {
     console.log(`context-surgeon v${packageVersion}
 
 Usage:
   context-surgeon codex [args...]    Launch Codex with context surgery enabled
   context-surgeon claude [args...]   Launch Claude Code with context surgery enabled
+  context-surgeon cursor             Start proxy + tunnel for Cursor IDE (BYOK base URL override)
+                                     Use --no-tunnel for local-only mode
 
 When running inside a session:
   context-surgeon evict <id> [--media image|document] [--occurrences 1,3]

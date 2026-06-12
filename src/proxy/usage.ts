@@ -1,6 +1,9 @@
 import type { IncomingHttpHeaders } from "node:http";
 
-export type ProviderFormat = "openai-responses" | "anthropic-messages";
+export type ProviderFormat =
+  | "openai-responses"
+  | "anthropic-messages"
+  | "openai-chat-completions";
 
 type UsageTap = {
   onChunk: (chunk: Buffer) => void;
@@ -122,6 +125,20 @@ function promptTokensFromOpenAiPayload(payload: unknown): number | null {
   return typeof inputTokens === "number" ? inputTokens : null;
 }
 
+function promptTokensFromChatCompletionsPayload(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const usage = (payload as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+
+  const promptTokens = (usage as Record<string, unknown>).prompt_tokens;
+  return typeof promptTokens === "number" ? promptTokens : null;
+}
+
 function extractPromptTokens(
   format: ProviderFormat,
   payload: unknown,
@@ -129,6 +146,9 @@ function extractPromptTokens(
 ): number | null {
   if (format === "openai-responses") {
     return promptTokensFromOpenAiPayload(payload);
+  }
+  if (format === "openai-chat-completions") {
+    return promptTokensFromChatCompletionsPayload(payload);
   }
   return promptTokensFromAnthropicPayload(payload, anthropicState);
 }

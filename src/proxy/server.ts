@@ -134,6 +134,8 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         (url.startsWith("/v1/responses") ||
           url.startsWith("/anthropic/v1/messages") ||
           url.startsWith("/v1/messages") ||
+          url.startsWith("/v1/chat/completions") ||
+          url.startsWith("/chat/completions") ||
           url.includes("/codex/responses"));
 
       if (isProxyable) {
@@ -165,6 +167,8 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
               handlerConfig.upstreamAnthropic + (url.replace(/^\/anthropic/, "") || "/");
           } else if (url.startsWith("/v1/messages")) {
             rawUpstream = handlerConfig.upstreamAnthropic + url;
+          } else if (url.startsWith("/chat/completions")) {
+            rawUpstream = handlerConfig.upstreamOpenAI + url;
           } else {
             rawUpstream = handlerConfig.upstreamOpenAI + url.replace(/^\/v1/, "");
           }
@@ -228,6 +232,10 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         upstream = handlerConfig.upstreamAnthropic + url;
       } else if (url.startsWith("/v1")) {
         upstream = handlerConfig.upstreamOpenAI + url.replace(/^\/v1/, "");
+      } else if (url.startsWith("/chat/completions") || url.startsWith("/models")) {
+        // Cursor probes the BYOK base URL without a /v1 prefix when the
+        // override URL already ends in /v1
+        upstream = handlerConfig.upstreamOpenAI + url;
       } else {
         upstream = handlerConfig.upstreamChatGPT + url;
       }
