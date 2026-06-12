@@ -22,6 +22,60 @@ function getSkillPath(): string {
 
 type Target = "codex" | "claude";
 
+function hasConfigOverride(args: string[], key: string): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if ((arg === "-c" || arg === "--config") && args[i + 1]) {
+      if (args[i + 1].trim().startsWith(`${key}=`)) {
+        return true;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("-c") && arg.slice(2).trim().startsWith(`${key}=`)) {
+      return true;
+    }
+
+    if (arg.startsWith("--config=")) {
+      const value = arg.slice("--config=".length).trim();
+      if (value.startsWith(`${key}=`)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasOption(args: string[], shortFlag: string, longFlag: string): boolean {
+  return args.some(
+    (arg) => arg === shortFlag || arg === longFlag || arg.startsWith(`${longFlag}=`)
+  );
+}
+
+function userConfigHasTopLevelModelProvider(): boolean {
+  try {
+    const raw = readFileSync(join(homedir(), ".codex", "config.toml"), "utf-8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+      if (trimmed.startsWith("[")) {
+        return false;
+      }
+      if (/^model_provider\s*=/.test(trimmed)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
 export async function launch(
   target: Target,
   extraArgs: string[]
@@ -66,11 +120,36 @@ export async function launch(
 
   if (target === "codex") {
     const proxyBase = `http://127.0.0.1:${proxy.port}`;
+    const shouldUseProxyProvider =
+      !extraArgs.includes("--oss") &&
+      !process.env.OPENAI_API_KEY &&
+      !hasOption(extraArgs, "-p", "--profile") &&
+      !hasConfigOverride(extraArgs, "profile") &&
+      !hasConfigOverride(extraArgs, "model_provider") &&
+      !userConfigHasTopLevelModelProvider();
+    const providerId = "context_surgeon_chatgpt";
+    const providerArgs = shouldUseProxyProvider
+      ? [
+          "-c",
+          `model_provider="${providerId}"`,
+          "-c",
+          `model_providers.${providerId}.name="Context Surgeon ChatGPT"`,
+          "-c",
+          `model_providers.${providerId}.base_url="${proxyBase}/backend-api/codex"`,
+          "-c",
+          `model_providers.${providerId}.wire_api="responses"`,
+          "-c",
+          `model_providers.${providerId}.requires_openai_auth=true`,
+          "-c",
+          `model_providers.${providerId}.supports_websockets=false`,
+        ]
+      : [];
     extraArgs = [
       "-c",
       `chatgpt_base_url="${proxyBase}/backend-api/"`,
       "-c",
       `openai_base_url="${proxyBase}/backend-api/codex"`,
+      ...providerArgs,
       ...extraArgs,
     ];
   } else if (target === "claude") {

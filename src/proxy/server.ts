@@ -188,13 +188,18 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
             body: result.body,
             format: result.format,
             onPromptTokens: (tokens) => {
+              if (!result.updatesConversationState) {
+                return;
+              }
               latestExactPromptTokens = tokens;
               latestPromptTokens = tokens;
             },
           },
           res
         );
-        latestPromptTokens = result.statusSummary.promptTokens;
+        if (result.updatesConversationState) {
+          latestPromptTokens = result.statusSummary.promptTokens;
+        }
         return;
       }
 

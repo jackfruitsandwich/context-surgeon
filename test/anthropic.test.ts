@@ -313,6 +313,82 @@ describe("Anthropic Claude support", () => {
     expect(shadowStore.get("user message 1")?.tokenEstimate).toBe(null);
   });
 
+  it("collapses extra non-tool Claude blocks when a whole message is evicted", async () => {
+    const directiveStore = new DirectiveStore();
+    const shadowStore = new ShadowStore();
+    directiveStore.set("user message 1", { type: "evict" });
+
+    const result = await transformRequest(
+      "/anthropic/v1/messages",
+      Buffer.from(
+        JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 4096,
+          stream: true,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "First block" },
+                { type: "text", text: "Second block" },
+              ],
+            },
+          ],
+        }),
+        "utf-8"
+      ),
+      { "content-type": "application/json" },
+      makeHandlerConfig(directiveStore, shadowStore)
+    );
+
+    expect(result).not.toBeNull();
+    const output = JSON.parse(result!.body.toString("utf-8")) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+
+    expect(output.messages[0]?.content).toEqual([
+      {
+        type: "text",
+        text: expect.stringContaining("[user message 1] [evicted]"),
+      },
+    ]);
+  });
+
+  it("preserves Claude tool blocks while replacing sibling text blocks", async () => {
+    const directiveStore = new DirectiveStore();
+    const shadowStore = new ShadowStore();
+    directiveStore.set("user message 2", {
+      type: "replace",
+      content: "Tool output acknowledged.",
+    });
+
+    const result = await transformRequest(
+      "/anthropic/v1/messages",
+      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
+      { "content-type": "application/json" },
+      makeHandlerConfig(directiveStore, shadowStore)
+    );
+
+    expect(result).not.toBeNull();
+    const output = JSON.parse(result!.body.toString("utf-8")) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+
+    expect(output.messages[2]?.content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_abc123",
+        content: "[tool result 1.1] const app = express();",
+      },
+      {
+        type: "text",
+        text: expect.stringContaining(
+          "[user message 2] Tool output acknowledged."
+        ),
+      },
+    ]);
+  });
+
   it("evicts Claude tool results without breaking tool_use_id pairing", async () => {
     const directiveStore = new DirectiveStore();
     const shadowStore = new ShadowStore();
@@ -433,6 +509,83 @@ describe("Anthropic Claude support", () => {
     expect(firstUser).toBe(
       "[user message 1] ## Test Skill\n\nIgnore: genuin-joging-awkwerd-febuary\n\nRead src/app.ts\n\n[context-surgeon: 1,000/128,000 tokens (0.8%) | 1 evicted]"
     );
+  });
+
+  it("does not prune directives from Claude Code auxiliary title requests", async () => {
+    const directiveStore = new DirectiveStore();
+    const shadowStore = new ShadowStore();
+    const config = makeHandlerConfig(
+      directiveStore,
+      shadowStore,
+      TEST_SKILL_MARKDOWN
+    );
+
+    await transformRequest(
+      "/anthropic/v1/messages",
+      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
+      { "content-type": "application/json" },
+      config
+    );
+
+    directiveStore.set("assistant message 1.1", {
+      type: "replace",
+      content: "summary kept through title request",
+    });
+
+    const titleRequest = {
+      model: "claude-sonnet-4-5",
+      max_tokens: 32000,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"],
+          },
+        },
+      },
+      system: [
+        {
+          type: "text",
+          text: "Generate a concise, sentence-case title for this session.",
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: "Read src/app.ts",
+        },
+      ],
+    };
+
+    const titleResult = await transformRequest(
+      "/anthropic/v1/messages",
+      Buffer.from(JSON.stringify(titleRequest), "utf-8"),
+      { "content-type": "application/json" },
+      config
+    );
+
+    expect(titleResult?.updatesConversationState).toBe(false);
+    expect(directiveStore.has("assistant message 1.1")).toBe(true);
+
+    const mainResult = await transformRequest(
+      "/anthropic/v1/messages",
+      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
+      { "content-type": "application/json" },
+      config
+    );
+
+    expect(mainResult?.updatesConversationState).toBe(true);
+    const output = JSON.parse(mainResult!.body.toString("utf-8")) as {
+      messages: Array<{ content: string | Array<Record<string, unknown>> }>;
+    };
+    const assistantBlocks = output.messages[1].content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+    expect(assistantBlocks[0]).toMatchObject({
+      type: "text",
+      text: "[assistant message 1.1] summary kept through title request",
+    });
   });
 
   it("clears directive state and re-injects the skill prompt on full rewrite", async () => {

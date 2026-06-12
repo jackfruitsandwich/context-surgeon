@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import type {
   ContextItem,
   ContextObject,
+  ContentBlock,
   Directive,
   FormatAdapter,
 } from "../context/types.js";
@@ -62,6 +63,7 @@ type TransformResult = {
   headers: Record<string, string>;
   format: SupportedFormat;
   statusSummary: StatusSummary;
+  updatesConversationState: boolean;
 };
 
 type SupportedFormat = "openai-responses" | "anthropic-messages";
@@ -69,6 +71,13 @@ type SupportedFormat = "openai-responses" | "anthropic-messages";
 const openaiAdapter = new OpenAIResponsesAdapter();
 const anthropicAdapter = new AnthropicMessagesAdapter();
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
+
+type ZlibWithOptionalZstd = typeof zlib & {
+  zstdDecompress?: (
+    buffer: Buffer,
+    callback: (error: Error | null, result: Buffer) => void
+  ) => void;
+};
 
 type HistoryTransition = "append" | "truncate" | "rewrite";
 
@@ -134,8 +143,9 @@ async function decompressBody(
     // Node 22+ has zstd support in zlib behind experimental flag
     // Try native first, fall back to raw passthrough
     try {
-      if (typeof zlib.zstdDecompress === "function") {
-        const decompress = promisify(zlib.zstdDecompress);
+      const zstdDecompress = (zlib as ZlibWithOptionalZstd).zstdDecompress;
+      if (typeof zstdDecompress === "function") {
+        const decompress = promisify(zstdDecompress);
         return await decompress(rawBody);
       }
     } catch {
@@ -314,6 +324,92 @@ function contextHasSkillSignature(ctx: ContextObject): boolean {
   return false;
 }
 
+function contentBlocksToText(content: ContentBlock[]): string {
+  return content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function anthropicSystemText(json: Record<string, unknown>): string {
+  const system = json.system;
+  if (typeof system === "string") {
+    return system;
+  }
+  if (!Array.isArray(system)) {
+    return "";
+  }
+  return system
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        !!block &&
+        typeof block === "object" &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string"
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function isAnthropicTitleRequest(json: Record<string, unknown>): boolean {
+  const outputConfig = json.output_config as
+    | {
+        format?: {
+          schema?: {
+            properties?: Record<string, unknown>;
+          };
+        };
+      }
+    | undefined;
+
+  if (outputConfig?.format?.schema?.properties?.title) {
+    return true;
+  }
+
+  return anthropicSystemText(json).includes(
+    "Generate a concise, sentence-case title"
+  );
+}
+
+function isAnthropicPromptSuggestionRequest(ctx: ContextObject): boolean {
+  return ctx.items.some((item) => {
+    if (item.kind !== "user-message") {
+      return false;
+    }
+    return contentBlocksToText(item.content).includes("[SUGGESTION MODE:");
+  });
+}
+
+function isAnthropicQuotaRequest(
+  json: Record<string, unknown>,
+  ctx: ContextObject
+): boolean {
+  if (json.max_tokens !== 1 || ctx.items.length !== 1) {
+    return false;
+  }
+  const [item] = ctx.items;
+  if (item.kind !== "user-message") {
+    return false;
+  }
+  return contentBlocksToText(item.content).trim() === "quota";
+}
+
+function updatesConversationState(
+  format: SupportedFormat,
+  json: Record<string, unknown>,
+  ctx: ContextObject
+): boolean {
+  if (format !== "anthropic-messages") {
+    return true;
+  }
+
+  return !(
+    isAnthropicTitleRequest(json) ||
+    isAnthropicPromptSuggestionRequest(ctx) ||
+    isAnthropicQuotaRequest(json, ctx)
+  );
+}
+
 export async function transformRequest(
   path: string,
   rawBody: Buffer,
@@ -348,12 +444,17 @@ export async function transformRequest(
   if (config.skillMarkdown.trim() && !contextHasSkillSignature(ctx)) {
     prependTextToFirstUserMessage(ctx, config.skillMarkdown.trim());
   }
-  const previousSkeleton = config.getPreviousSkeleton();
+  const shouldUpdateConversationState = updatesConversationState(format, json, ctx);
+  const previousSkeleton = shouldUpdateConversationState
+    ? config.getPreviousSkeleton()
+    : null;
   const nextSkeleton = buildSkeleton(ctx.items);
   const historyTransition = classifyHistoryTransition(previousSkeleton, nextSkeleton);
-  config.setPreviousSkeleton(nextSkeleton);
+  if (shouldUpdateConversationState) {
+    config.setPreviousSkeleton(nextSkeleton);
+  }
 
-  if (historyTransition === "rewrite") {
+  if (shouldUpdateConversationState && historyTransition === "rewrite") {
     config.directiveStore.clear();
     config.shadowStore.clear();
   }
@@ -363,10 +464,12 @@ export async function transformRequest(
   // Pipeline:
   // 1. Assign IDs
   assignIds(ctx.items);
-  config.setCurrentSkeletonItems?.(buildSkeletonItems(ctx.items));
+  if (shouldUpdateConversationState) {
+    config.setCurrentSkeletonItems?.(buildSkeletonItems(ctx.items));
+  }
 
   const currentIds = new Set(ctx.items.map((item) => item.id));
-  if (historyTransition === "truncate") {
+  if (shouldUpdateConversationState && historyTransition === "truncate") {
     pruneMissingDirectiveState(currentIds, config.directiveStore, config.shadowStore);
   }
 
@@ -418,5 +521,12 @@ export async function transformRequest(
 
   const headers = buildUpstreamHeaders(incomingHeaders, outputBody);
 
-  return { body: outputBody, upstreamUrl, headers, format, statusSummary };
+  return {
+    body: outputBody,
+    upstreamUrl,
+    headers,
+    format,
+    statusSummary,
+    updatesConversationState: shouldUpdateConversationState,
+  };
 }

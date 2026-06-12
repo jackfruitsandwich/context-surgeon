@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
 import { launch } from "./cli/launch.js";
 import { runCommand } from "./cli/commands.js";
+
+const packageJson = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version?: string };
+const packageVersion = packageJson.version ?? "unknown";
 
 const args = process.argv.slice(2);
 const commandModeCommands = new Set([
@@ -30,7 +36,7 @@ if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) 
       process.exit(1);
     });
   } else {
-    console.log(`context-surgeon v0.1.0
+    console.log(`context-surgeon v${packageVersion}
 
 Usage:
   context-surgeon codex [args...]    Launch Codex with context surgery enabled

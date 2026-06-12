@@ -301,6 +301,7 @@ export class AnthropicMessagesAdapter implements FormatAdapter {
         );
         const originalBlocks = normalizeMessageContent(rawMessage.content);
         const nonToolBlockMap = new Map<number, number>();
+        const usedContentIndices = new Set<number>();
 
         (messageItem.blockIndices || []).forEach((blockIndex, contentIndex) => {
           nonToolBlockMap.set(blockIndex, contentIndex);
@@ -338,9 +339,20 @@ export class AnthropicMessagesAdapter implements FormatAdapter {
             return;
           }
 
+          const contentBlock = messageItem.content[contentIndex];
+          if (!contentBlock) {
+            return;
+          }
+          usedContentIndices.add(contentIndex);
           rebuiltBlocks.push(
-            serializeContentBlock(messageItem.content[contentIndex], originalBlock)
+            serializeContentBlock(contentBlock, originalBlock)
           );
+        });
+
+        messageItem.content.forEach((block, contentIndex) => {
+          if (!usedContentIndices.has(contentIndex)) {
+            rebuiltBlocks.push(serializeContentBlock(block));
+          }
         });
 
         rawMessage.content = denormalizeMessageContent(
