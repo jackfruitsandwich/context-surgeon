@@ -230,6 +230,75 @@ describe("transformRequest for chat completions", () => {
     );
   });
 
+  it("reroutes Responses-shaped bodies on the chat completions path (Cursor gpt-5.x)", async () => {
+    const body = {
+      model: "gpt-5.5",
+      stream: true,
+      input: [
+        { role: "system", content: "You are GPT-5.5." },
+        { role: "user", content: [{ type: "input_text", text: "hello" }] },
+      ],
+    };
+
+    const result = await transformRequest(
+      "/v1/chat/completions",
+      Buffer.from(JSON.stringify(body), "utf-8"),
+      { "content-type": "application/json" },
+      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.format).toBe("openai-responses");
+    expect(result?.upstreamUrl).toBe("https://api.openai.com/v1/responses");
+
+    const parsed = JSON.parse(result!.body.toString("utf-8")) as {
+      input: unknown[];
+      messages?: unknown;
+    };
+    expect(Array.isArray(parsed.input)).toBe(true);
+    expect(parsed.messages).toBeUndefined();
+  });
+
+  it("parses Cursor's typeless string-content input items into real messages", async () => {
+    const body = {
+      model: "gpt-5.5",
+      stream: true,
+      user: "5610827b91bf8921",
+      input: [
+        { role: "system", content: "You are GPT-5.5.\n\nYou operate in Cursor." },
+        { role: "user", content: "hello there" },
+        { role: "assistant", content: "hi, how can I help?" },
+        { role: "user", content: "evict something" },
+      ],
+    };
+
+    const result = await transformRequest(
+      "/v1/chat/completions",
+      Buffer.from(JSON.stringify(body), "utf-8"),
+      { "content-type": "application/json" },
+      makeHandlerConfig(new DirectiveStore(), new ShadowStore(), TEST_SKILL_MARKDOWN)
+    );
+
+    expect(result).not.toBeNull();
+    const parsed = JSON.parse(result!.body.toString("utf-8")) as {
+      input: Array<{ role?: string; type?: string; content: unknown }>;
+    };
+
+    // system item passes through byte-identical (no type field added)
+    expect(parsed.input[0]).toEqual({
+      role: "system",
+      content: "You are GPT-5.5.\n\nYou operate in Cursor.",
+    });
+
+    // user/assistant items got IDs, stayed string-content and typeless
+    expect(parsed.input[1].type).toBeUndefined();
+    expect(parsed.input[1].content).toContain("[user message 1]");
+    expect(parsed.input[1].content).toContain("Test Skill"); // skill injected
+    expect(parsed.input[2].content).toContain("[assistant message 1.1]");
+    expect(parsed.input[3].content).toContain("[user message 2]");
+    expect(parsed.input[3].content).toContain("[context-surgeon:"); // status line
+  });
+
   it("handles base URLs entered without a /v1 suffix", async () => {
     const result = await transformRequest(
       "/chat/completions",

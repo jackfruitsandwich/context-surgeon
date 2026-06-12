@@ -109,9 +109,17 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
     },
   };
 
+  const debug = !!process.env.CONTEXT_SURGEON_DEBUG;
+
   const server = http.createServer(async (req, res) => {
     const url = req.url || "";
     const method = req.method || "GET";
+
+    if (debug) {
+      console.error(
+        `[debug] ${method} ${url} encoding=${req.headers["content-encoding"] ?? "none"} type=${req.headers["content-type"] ?? "?"}`
+      );
+    }
 
     try {
       // Control API
@@ -140,6 +148,12 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
 
       if (isProxyable) {
         const rawBody = await readRequestBody(req);
+
+        if (debug) {
+          console.error(
+            `[debug] body[0..400]: ${rawBody.subarray(0, 400).toString("utf-8")}`
+          );
+        }
 
         const incomingHeaders: Record<string, string> = {};
         for (const [key, value] of Object.entries(req.headers)) {
@@ -351,7 +365,8 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
   });
 
   return new Promise((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => {
+    const listenPort = parseInt(process.env.CONTEXT_SURGEON_LISTEN_PORT || "0", 10);
+    server.listen(listenPort, "127.0.0.1", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") {
         reject(new Error("Failed to get server address"));

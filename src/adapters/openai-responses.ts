@@ -21,9 +21,11 @@ type ResponseInputItem =
   | { type: string; [key: string]: unknown }; // catch-all
 
 type MessageItem = {
-  type: "message";
+  // Codex sends type: "message"; Cursor's BYOK dialect omits the type field
+  // and may use a plain string for content.
+  type?: "message";
   role: string;
-  content: MessageContentItem[];
+  content: MessageContentItem[] | string;
   [key: string]: unknown;
 };
 
@@ -50,8 +52,13 @@ type FunctionCallOutputItem = {
 
 // --- Parsing helpers ---
 
-function parseMessageContent(items: MessageContentItem[]): ContentBlock[] {
-  return items.map((item) => {
+function parseMessageContent(
+  content: MessageContentItem[] | string
+): ContentBlock[] {
+  if (typeof content === "string") {
+    return [{ type: "text", text: content }];
+  }
+  return content.map((item) => {
     if (
       (item.type === "input_text" || item.type === "output_text") &&
       typeof item.text === "string"
@@ -91,7 +98,11 @@ export class OpenAIResponsesAdapter implements FormatAdapter {
     let otherCounter = 0;
 
     for (const inputItem of req.input) {
-      if (inputItem.type === "message") {
+      const isMessage =
+        inputItem.type === "message" ||
+        (inputItem.type === undefined &&
+          typeof (inputItem as MessageItem).role === "string");
+      if (isMessage) {
         const msg = inputItem as MessageItem;
         const content = parseMessageContent(msg.content || []);
 
@@ -162,22 +173,24 @@ export class OpenAIResponsesAdapter implements FormatAdapter {
 
     for (const item of ctx.items) {
       switch (item.kind) {
-        case "user-message": {
-          const rawMsg = item.raw as MessageItem;
-          const content = item.content.map((b) =>
-            serializeContentBlock(b, "user")
-          );
-          input.push({
-            ...rawMsg,
-            content,
-          });
-          break;
-        }
+        case "user-message":
         case "assistant-message": {
+          const role = item.kind === "user-message" ? "user" : "assistant";
           const rawMsg = item.raw as MessageItem;
-          const content = item.content.map((b) =>
-            serializeContentBlock(b, "assistant")
-          );
+          // Cursor's dialect uses plain string content — keep it a string as
+          // long as the item is still a single text block.
+          if (
+            typeof rawMsg.content === "string" &&
+            item.content.length === 1 &&
+            item.content[0].type === "text"
+          ) {
+            input.push({
+              ...rawMsg,
+              content: item.content[0].text,
+            });
+            break;
+          }
+          const content = item.content.map((b) => serializeContentBlock(b, role));
           input.push({
             ...rawMsg,
             content,

@@ -424,8 +424,9 @@ export async function transformRequest(
   incomingHeaders: Record<string, string>,
   config: HandlerConfig
 ): Promise<TransformResult | null> {
-  const format = detectFormat(path);
+  let format = detectFormat(path);
   if (!format) return null;
+  let effectivePath = path;
 
   // Try to decompress if needed
   let bodyBuf: Buffer;
@@ -441,6 +442,18 @@ export async function transformRequest(
     json = JSON.parse(bodyBuf.toString("utf-8")) as Record<string, unknown>;
   } catch {
     return null; // will fall through to raw forward
+  }
+
+  // Cursor BYOK sends Responses-format bodies ("input", no "messages") to the
+  // chat completions path for newer GPT models. Trust the body shape over the
+  // path and reroute to the Responses endpoint.
+  if (
+    format === "openai-chat-completions" &&
+    !Array.isArray(json.messages) &&
+    Array.isArray(json.input)
+  ) {
+    format = "openai-responses";
+    effectivePath = "/v1/responses";
   }
 
   if (!canTransformRequest(json, format)) {
@@ -511,7 +524,7 @@ export async function transformRequest(
   const outputBody = Buffer.from(JSON.stringify(outputJson), "utf-8");
 
   // Build upstream URL
-  const upstreamUrl = getUpstreamUrl(format, path, config);
+  const upstreamUrl = getUpstreamUrl(format, effectivePath, config);
 
   config.onDebugSnapshot?.({
     timestamp: new Date().toISOString(),
