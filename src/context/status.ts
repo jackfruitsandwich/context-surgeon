@@ -1,11 +1,11 @@
 import type { ContextItem, ContextObject, ContentBlock } from "./types.js";
-import type { ShadowStore } from "../store/shadow-store.js";
 
 export type StatusSummary = {
   promptTokens: number | null;
   maxTokens: number;
   pct: string;
   evictedCount: number;
+  evictedTokens: number;
 };
 
 export type TextCharStats = {
@@ -84,7 +84,8 @@ export function estimateTokensFromChars(totalChars: number): number {
 
 export function buildStatusSummary(
   promptTokens: number | null,
-  shadowStore: ShadowStore,
+  evictedCount: number,
+  evictedTokens: number,
   maxTokens: number
 ): StatusSummary {
   const pct =
@@ -96,7 +97,8 @@ export function buildStatusSummary(
     promptTokens,
     maxTokens,
     pct,
-    evictedCount: shadowStore.size(),
+    evictedCount,
+    evictedTokens,
   };
 }
 
@@ -104,9 +106,17 @@ export function makeStatusLine(summary: StatusSummary): string {
   const promptText =
     summary.promptTokens === null ? "?" : summary.promptTokens.toLocaleString();
 
+  const evictedText =
+    summary.evictedCount > 0
+      ? ` | ${summary.evictedCount} evicted` +
+        (summary.evictedTokens > 0
+          ? ` (~${summary.evictedTokens.toLocaleString()} tokens saved)`
+          : "")
+      : "";
+
   return (
     `[context-surgeon: ${promptText}/${summary.maxTokens.toLocaleString()} tokens (${summary.pct}%)` +
-    (summary.evictedCount > 0 ? ` | ${summary.evictedCount} evicted` : "") +
+    evictedText +
     `]`
   );
 }

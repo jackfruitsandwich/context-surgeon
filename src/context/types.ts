@@ -23,6 +23,7 @@ export type ContextItem =
 export type UserMessage = {
   kind: "user-message";
   id: string;
+  fingerprint?: string;
   content: ContentBlock[];
   raw: unknown;
   messageIndex?: number;
@@ -32,6 +33,7 @@ export type UserMessage = {
 export type AssistantMessage = {
   kind: "assistant-message";
   id: string;
+  fingerprint?: string;
   content: ContentBlock[];
   raw: unknown;
   messageIndex?: number;
@@ -41,6 +43,7 @@ export type AssistantMessage = {
 export type ToolCall = {
   kind: "tool-call";
   id: string;
+  fingerprint?: string;
   callId: string;
   name: string;
   arguments: string;
@@ -52,6 +55,7 @@ export type ToolCall = {
 export type ToolResult = {
   kind: "tool-result";
   id: string;
+  fingerprint?: string;
   callId: string;
   output: string | ContentBlock[];
   raw: unknown;
@@ -62,6 +66,7 @@ export type ToolResult = {
 export type OtherItem = {
   kind: "other";
   id: string;
+  fingerprint?: string;
   raw: unknown;
   messageIndex?: number;
 };

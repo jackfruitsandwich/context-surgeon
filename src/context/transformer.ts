@@ -1,63 +1,16 @@
 import type {
   ContextObject,
-  ContextItem,
   ContentBlock,
-  Directive,
   MediaType,
 } from "./types.js";
 import type { DirectiveStore } from "../store/directive-store.js";
-import type { ShadowStore } from "../store/shadow-store.js";
 import {
   estimateTokensByTextShare,
   type TextCharStats,
 } from "./status.js";
-import { lookupDirectiveForItem } from "./directive-targets.js";
 
 function makeMediaPlaceholder(mediaType: MediaType): string {
   return mediaType === "image" ? "[image evicted]" : "[document evicted]";
-}
-
-function cloneOutput(
-  output: string | ContentBlock[]
-): string | ContentBlock[] {
-  return typeof output === "string" ? output : [...output];
-}
-
-function saveShadowIfNeeded(
-  item: ContextItem,
-  lookupId: string,
-  directive: Directive,
-  shadowStore: ShadowStore,
-  stats: {
-    textCharStats: TextCharStats;
-    latestExactPromptTokens: number | null;
-  }
-): void {
-  if (shadowStore.has(lookupId)) {
-    return;
-  }
-
-  const itemChars = stats.textCharStats.itemChars.get(lookupId) ?? null;
-  shadowStore.save(lookupId, {
-    originalOutput:
-      item.kind === "tool-result"
-        ? cloneOutput(item.output)
-        : item.kind === "tool-call"
-          ? item.arguments
-          : "",
-    originalContent:
-      item.kind === "user-message" || item.kind === "assistant-message"
-        ? [...item.content]
-        : [],
-    tokenEstimate:
-      directive.type === "evict" && directive.mediaType
-        ? null
-        : estimateTokensByTextShare(
-            itemChars,
-            stats.textCharStats.totalChars,
-            stats.latestExactPromptTokens
-          ),
-  });
 }
 
 function isMatchingMediaBlock(
@@ -95,21 +48,43 @@ function replaceMediaBlocks(
   return { content, changed };
 }
 
+export type AppliedDirective = {
+  fingerprint: string;
+  itemId: string;
+  tokenEstimate: number | null;
+};
+
+/**
+ * Apply stored directives to every item whose fingerprint matches. Purely
+ * content-addressed: requests from unrelated conversations contain no
+ * matching fingerprints and pass through untouched.
+ */
 export function applyDirectives(
   ctx: ContextObject,
   directiveStore: DirectiveStore,
-  shadowStore: ShadowStore,
   stats: {
     textCharStats: TextCharStats;
     latestExactPromptTokens: number | null;
   }
-): void {
-  for (const item of ctx.items) {
-    const match = lookupDirectiveForItem(item, directiveStore);
-    if (!match) continue;
+): AppliedDirective[] {
+  const applied: AppliedDirective[] = [];
 
-    const lookupId = item.id;
-    const directive = match.directive;
+  for (const item of ctx.items) {
+    const fingerprint = item.fingerprint;
+    if (!fingerprint) continue;
+    const entry = directiveStore.get(fingerprint);
+    if (!entry) continue;
+
+    const directive = entry.directive;
+    const itemChars = stats.textCharStats.itemChars.get(item.id) ?? null;
+    const tokenEstimate =
+      directive.type === "evict" && directive.mediaType
+        ? null
+        : estimateTokensByTextShare(
+            itemChars,
+            stats.textCharStats.totalChars,
+            stats.latestExactPromptTokens
+          );
 
     if (directive.type === "evict") {
       if (directive.mediaType) {
@@ -122,7 +97,6 @@ export function applyDirectives(
           if (!replaced.changed) {
             continue;
           }
-          saveShadowIfNeeded(item, lookupId, directive, shadowStore, stats);
           item.content = replaced.content;
         } else if (item.kind === "tool-result" && Array.isArray(item.output)) {
           const replaced = replaceMediaBlocks(
@@ -133,13 +107,13 @@ export function applyDirectives(
           if (!replaced.changed) {
             continue;
           }
-          saveShadowIfNeeded(item, lookupId, directive, shadowStore, stats);
           item.output = replaced.content;
+        } else {
+          continue;
         }
+        applied.push({ fingerprint, itemId: item.id, tokenEstimate });
         continue;
       }
-
-      saveShadowIfNeeded(item, lookupId, directive, shadowStore, stats);
 
       if (item.kind === "user-message" || item.kind === "assistant-message") {
         item.content = [{ type: "text", text: "[evicted]" }];
@@ -147,52 +121,23 @@ export function applyDirectives(
         item.output = "[evicted]";
       } else if (item.kind === "tool-call") {
         item.arguments = "{}";
+      } else {
+        continue;
       }
+      applied.push({ fingerprint, itemId: item.id, tokenEstimate });
     } else if (directive.type === "replace") {
-      saveShadowIfNeeded(item, lookupId, directive, shadowStore, stats);
-
-      // Replace content with the provided summary
       if (item.kind === "user-message" || item.kind === "assistant-message") {
         item.content = [{ type: "text", text: directive.content }];
       } else if (item.kind === "tool-result") {
         item.output = directive.content;
       } else if (item.kind === "tool-call") {
-        // Replace arguments with a note (unusual but supported)
         item.arguments = JSON.stringify({ _replaced: directive.content });
+      } else {
+        continue;
       }
+      applied.push({ fingerprint, itemId: item.id, tokenEstimate });
     }
   }
-}
 
-export function applyRestore(
-  id: string,
-  ctx: ContextObject,
-  directiveStore: DirectiveStore,
-  shadowStore: ShadowStore
-): boolean {
-  const shadow = shadowStore.get(id);
-  if (!shadow) return false;
-
-  for (const item of ctx.items) {
-    const lookupId = item.id;
-    if (lookupId !== id) continue;
-
-    // Restore original content
-    if (item.kind === "user-message" || item.kind === "assistant-message") {
-      item.content = [...shadow.originalContent];
-    } else if (item.kind === "tool-result") {
-      item.output = shadow.originalOutput;
-    } else if (item.kind === "tool-call") {
-      if (typeof shadow.originalOutput === "string") {
-        item.arguments = shadow.originalOutput;
-      }
-    }
-
-    break;
-  }
-
-  // Clean up
-  directiveStore.delete(id);
-  shadowStore.delete(id);
-  return true;
+  return applied;
 }

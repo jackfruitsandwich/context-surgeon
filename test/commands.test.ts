@@ -82,11 +82,12 @@ describe("normalizeCommandId", () => {
       formatStatusOutput({
         summary: {
           statusLine: "[context-surgeon: 35,934/128,000 tokens (28.1%)]",
+          conversation: null,
         },
         activeDirectives: [],
       })
     ).toBe(
-      "[context-surgeon: 35,934/128,000 tokens (28.1%)]\n\nActive directives:\nnone"
+      "[context-surgeon: 35,934/128,000 tokens (28.1%)]\n\nDirectives (persisted):\nnone"
     );
   });
 
@@ -96,30 +97,42 @@ describe("normalizeCommandId", () => {
         summary: {
           statusLine:
             "[context-surgeon: 35,934/128,000 tokens (28.1%) | 2 evicted]",
+          conversation: { preview: "Read src/app.ts", itemCount: 7 },
         },
         activeDirectives: [
           {
             id: "tool result 3.2",
+            fingerprint: "aaaa",
             action: "evict",
             tokens: 463,
-            tokenState: "known",
+            state: "applied",
+            preview: "const app = express();",
           },
           {
             id: "assistant message 10.1",
+            fingerprint: "bbbb",
             action: "replace",
             tokens: null,
-            tokenState: "unknown",
+            state: "applied",
+            preview: "",
           },
           {
             id: "user message 12",
+            fingerprint: "cccc",
             action: "evict",
             tokens: null,
-            tokenState: "pending",
+            state: "pending",
+            preview: "",
           },
         ],
       })
     ).toBe(
-      "[context-surgeon: 35,934/128,000 tokens (28.1%) | 2 evicted]\n\nActive directives:\ntool result 3.2 | evict | 463 tokens\nassistant message 10.1 | replace | unknown\nuser message 12 | evict | pending"
+      "[context-surgeon: 35,934/128,000 tokens (28.1%) | 2 evicted]\n" +
+        'Conversation: "Read src/app.ts" (7 items)\n' +
+        "\nDirectives (persisted):\n" +
+        "tool result 3.2 | evict | 463 tokens | applied\n" +
+        "assistant message 10.1 | replace | unknown | applied\n" +
+        "user message 12 | evict | pending | pending"
     );
   });
 
@@ -128,18 +141,21 @@ describe("normalizeCommandId", () => {
       formatStatusOutput({
         summary: {
           statusLine: "[context-surgeon: 12,000/128,000 tokens (9.4%) | 1 evicted]",
+          conversation: null,
         },
         activeDirectives: [
           {
             id: "user message 6",
+            fingerprint: "dddd",
             action: "evict image (1,3)",
             tokens: null,
-            tokenState: "unknown",
+            state: "applied",
+            preview: "",
           },
         ],
       })
     ).toBe(
-      "[context-surgeon: 12,000/128,000 tokens (9.4%) | 1 evicted]\n\nActive directives:\nuser message 6 | evict image (1,3) | unknown"
+      "[context-surgeon: 12,000/128,000 tokens (9.4%) | 1 evicted]\n\nDirectives (persisted):\nuser message 6 | evict image (1,3) | unknown | applied"
     );
   });
 

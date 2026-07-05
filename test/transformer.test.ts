@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OpenAIResponsesAdapter } from "../src/adapters/openai-responses.js";
 import { assignIds } from "../src/context/id-assigner.js";
+import { computeFingerprints } from "../src/context/fingerprint.js";
 import { injectIds, injectStatusLine } from "../src/context/injector.js";
 import {
   buildStatusSummary,
@@ -12,7 +13,11 @@ import {
 } from "../src/context/status.js";
 import { applyDirectives } from "../src/context/transformer.js";
 import { DirectiveStore } from "../src/store/directive-store.js";
-import { ShadowStore } from "../src/store/shadow-store.js";
+import {
+  ConversationTracker,
+  resolveSelectors,
+} from "../src/proxy/conversations.js";
+import type { ContextObject, Directive } from "../src/context/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,12 +27,44 @@ function loadFixture(): Record<string, unknown> {
   );
 }
 
+function prepare(ctx: ContextObject): void {
+  computeFingerprints(ctx.items);
+  assignIds(ctx.items);
+}
+
+/** Mimic what the control API does: resolve an ordinal selector to fingerprints. */
+function setDirective(
+  store: DirectiveStore,
+  ctx: ContextObject,
+  selector: string,
+  directive: Directive
+): void {
+  const tracker = new ConversationTracker();
+  tracker.record(ctx.items);
+  const resolution = resolveSelectors(tracker, [selector]);
+  if (!resolution || resolution.missing.length > 0) {
+    throw new Error(`Test selector did not resolve: ${selector}`);
+  }
+  for (const target of resolution.resolved) {
+    for (const item of target.items) {
+      store.set(item.fingerprint, {
+        directive,
+        humanId: item.id,
+        preview: item.preview,
+        tokenEstimate: null,
+        createdAt: Date.now(),
+        lastMatchedAt: null,
+      });
+    }
+  }
+}
+
 describe("Full pipeline", () => {
   const adapter = new OpenAIResponsesAdapter();
 
   it("assigns turn-based IDs consistently across messages and tool items", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
     // developer = other
     expect(ctx.items[0].id).toMatch(/^other_/);
@@ -46,7 +83,7 @@ describe("Full pipeline", () => {
 
   it("injects IDs into message content", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
     injectIds(ctx);
 
     const userMsg = ctx.items[1];
@@ -68,7 +105,7 @@ describe("Full pipeline", () => {
 
   it("deduplicates repeated assistant labels at the start of assistant messages", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
     const asstMsg = ctx.items[2];
     if (asstMsg.kind === "assistant-message") {
@@ -90,41 +127,36 @@ describe("Full pipeline", () => {
     }
   });
 
-  it("evicts a tool result and stores shadow", () => {
+  it("evicts a tool result by fingerprint", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "tool result 1.1", { type: "evict" });
 
-    dirStore.set("tool result 1.1", { type: "evict" });
-    applyDirectives(ctx, dirStore, shadowStore, {
+    const applied = applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
 
-    // Tool result should be evicted
     const toolResult = ctx.items[4];
     if (toolResult.kind === "tool-result") {
       expect(toolResult.output).toBe("[evicted]");
     }
 
-    // Shadow store should have the original
-    expect(shadowStore.has("tool result 1.1")).toBe(true);
-    const shadow = shadowStore.get("tool result 1.1")!;
-    expect(shadow.originalOutput).toContain("express");
-    expect(shadow.tokenEstimate).toBeGreaterThan(0);
+    expect(applied).toHaveLength(1);
+    expect(applied[0].itemId).toBe("tool result 1.1");
+    expect(applied[0].tokenEstimate).toBeGreaterThan(0);
   });
 
-  it("applies whole-turn selector directives to exact item ids", () => {
+  it("expands whole-turn selectors to every item in the turn", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "turn 1", { type: "evict" });
 
-    dirStore.set("turn 1", { type: "evict" });
-    applyDirectives(ctx, dirStore, shadowStore, {
+    const applied = applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -132,13 +164,6 @@ describe("Full pipeline", () => {
     const firstUser = ctx.items[1];
     if (firstUser.kind === "user-message") {
       expect(firstUser.content).toEqual([{ type: "text", text: "[evicted]" }]);
-    }
-
-    const firstAssistant = ctx.items[2];
-    if (firstAssistant.kind === "assistant-message") {
-      expect(firstAssistant.content).toEqual([
-        { type: "text", text: "[evicted]" },
-      ]);
     }
 
     const toolCall = ctx.items[3];
@@ -151,13 +176,6 @@ describe("Full pipeline", () => {
       expect(toolResult.output).toBe("[evicted]");
     }
 
-    const secondAssistant = ctx.items[5];
-    if (secondAssistant.kind === "assistant-message") {
-      expect(secondAssistant.content).toEqual([
-        { type: "text", text: "[evicted]" },
-      ]);
-    }
-
     const secondUser = ctx.items[6];
     if (secondUser.kind === "user-message") {
       expect(secondUser.content).not.toEqual([
@@ -165,27 +183,21 @@ describe("Full pipeline", () => {
       ]);
     }
 
-    expect(shadowStore.has("turn 1")).toBe(false);
-    expect(shadowStore.has("user message 1")).toBe(true);
-    expect(shadowStore.has("assistant message 1.1")).toBe(true);
-    expect(shadowStore.has("tool call 1.1")).toBe(true);
-    expect(shadowStore.has("tool result 1.1")).toBe(true);
-    expect(shadowStore.has("assistant message 1.2")).toBe(true);
-    expect(shadowStore.has("user message 2")).toBe(false);
+    // user 1, assistant 1.1, tool call 1.1, tool result 1.1, assistant 1.2
+    expect(applied).toHaveLength(5);
   });
 
   it("replaces a tool result with a summary", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-
-    dirStore.set("tool result 1.1", {
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "tool result 1.1", {
       type: "replace",
       content: "Express server on port 3000 with GET / route",
     });
-    applyDirectives(ctx, dirStore, shadowStore, {
+
+    applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -196,25 +208,29 @@ describe("Full pipeline", () => {
         "Express server on port 3000 with GET / route"
       );
     }
-
-    // Shadow has original
-    expect(shadowStore.get("tool result 1.1")!.originalOutput).toContain("express");
   });
 
   it("evicts and then serializes back to valid format", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "tool result 1.1", { type: "evict" });
 
-    dirStore.set("tool result 1.1", { type: "evict" });
-    applyDirectives(ctx, dirStore, shadowStore, {
+    const applied = applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
     injectIds(ctx);
-    injectStatusLine(ctx, buildStatusSummary(1000, shadowStore, 128000));
+    injectStatusLine(
+      ctx,
+      buildStatusSummary(
+        1000,
+        applied.length,
+        applied.reduce((sum, entry) => sum + (entry.tokenEstimate ?? 0), 0),
+        128000
+      )
+    );
 
     const output = adapter.serialize(ctx);
 
@@ -240,7 +256,7 @@ describe("Full pipeline", () => {
 
   it("estimates prompt tokens from chars when no exact count exists", () => {
     const ctx = adapter.parse(loadFixture());
-    assignIds(ctx.items);
+    prepare(ctx);
     injectIds(ctx);
 
     const totalChars = computeTextCharStats(ctx).totalChars;
@@ -267,17 +283,16 @@ describe("Full pipeline", () => {
         },
       ],
     });
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    dirStore.set("user message 1", {
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "user message 1", {
       type: "evict",
       mediaType: "image",
       occurrences: [1],
     });
 
-    applyDirectives(ctx, dirStore, shadowStore, {
+    const applied = applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -292,8 +307,8 @@ describe("Full pipeline", () => {
       ]);
     }
 
-    expect(shadowStore.has("user message 1")).toBe(true);
-    expect(shadowStore.get("user message 1")?.tokenEstimate).toBe(null);
+    expect(applied).toHaveLength(1);
+    expect(applied[0].tokenEstimate).toBe(null);
 
     const output = adapter.serialize(ctx) as {
       input: Array<{ type: string; content?: Array<{ type: string; text?: string; image_url?: string }> }>;
@@ -322,13 +337,12 @@ describe("Full pipeline", () => {
         },
       ],
     });
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const dirStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    dirStore.set("user message 1", { type: "evict" });
+    const store = new DirectiveStore(null);
+    setDirective(store, ctx, "user message 1", { type: "evict" });
 
-    applyDirectives(ctx, dirStore, shadowStore, {
+    applyDirectives(ctx, store, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -340,5 +354,125 @@ describe("Full pipeline", () => {
     expect(output.input[0]?.content).toEqual([
       { type: "input_text", text: "[evicted]" },
     ]);
+  });
+});
+
+describe("Fingerprint chaining", () => {
+  const adapter = new OpenAIResponsesAdapter();
+
+  it("is stable across identical requests", () => {
+    const a = adapter.parse(loadFixture());
+    const b = adapter.parse(loadFixture());
+    computeFingerprints(a.items);
+    computeFingerprints(b.items);
+    expect(a.items.map((i) => i.fingerprint)).toEqual(
+      b.items.map((i) => i.fingerprint)
+    );
+  });
+
+  it("keeps shared-prefix fingerprints identical after a fork diverges", () => {
+    const a = adapter.parse(loadFixture());
+    const b = adapter.parse(loadFixture());
+    // Diverge b's LAST item (the second user message)
+    const lastB = b.items[b.items.length - 1];
+    if (lastB.kind === "user-message") {
+      lastB.content = [{ type: "text", text: "a different branch" }];
+    }
+    computeFingerprints(a.items);
+    computeFingerprints(b.items);
+
+    for (let i = 0; i < a.items.length - 1; i++) {
+      expect(a.items[i].fingerprint).toBe(b.items[i].fingerprint);
+    }
+    expect(a.items[a.items.length - 1].fingerprint).not.toBe(
+      b.items[b.items.length - 1].fingerprint
+    );
+  });
+
+  it("gives identical duplicate messages different fingerprints by position", () => {
+    const ctx = adapter.parse({
+      model: "gpt-4.1",
+      instructions: "",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "ok" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "ok" }] },
+      ],
+    });
+    computeFingerprints(ctx.items);
+    expect(ctx.items[0].fingerprint).not.toBe(ctx.items[2].fingerprint);
+  });
+
+  it("a directive from one conversation cannot match another conversation's identical text", () => {
+    const a = adapter.parse({
+      model: "gpt-4.1",
+      instructions: "",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "ok" }] },
+      ],
+    });
+    const b = adapter.parse({
+      model: "gpt-4.1",
+      instructions: "",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "different opener" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "ok" }] },
+      ],
+    });
+    computeFingerprints(a.items);
+    computeFingerprints(b.items);
+    assignIds(a.items);
+    assignIds(b.items);
+
+    const store = new DirectiveStore(null);
+    setDirective(store, a, "user message 2", { type: "evict" });
+
+    const applied = applyDirectives(b, store, {
+      textCharStats: computeTextCharStats(b),
+      latestExactPromptTokens: 1000,
+    });
+    expect(applied).toHaveLength(0);
+
+    const bSecond = b.items[1];
+    if (bSecond.kind === "user-message") {
+      expect(bSecond.content).toEqual([{ type: "text", text: "ok" }]);
+    }
+  });
+
+  it("ignores cache_control when fingerprinting", () => {
+    const a = adapter.parse({
+      model: "gpt-4.1",
+      instructions: "",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_image", image_url: "data:image/png;base64,AAA" },
+          ],
+        },
+      ],
+    });
+    const b = adapter.parse({
+      model: "gpt-4.1",
+      instructions: "",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_image",
+              image_url: "data:image/png;base64,AAA",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    });
+    computeFingerprints(a.items);
+    computeFingerprints(b.items);
+    expect(a.items[0].fingerprint).toBe(b.items[0].fingerprint);
   });
 });

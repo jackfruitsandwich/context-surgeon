@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { AnthropicMessagesAdapter } from "../src/adapters/anthropic-messages.js";
-import { assignIds } from "../src/context/id-assigner.js";
 import { injectIds, injectStatusLine } from "../src/context/injector.js";
 import {
   buildStatusSummary,
@@ -13,7 +12,8 @@ import {
   type HandlerConfig,
 } from "../src/proxy/handler.js";
 import { DirectiveStore } from "../src/store/directive-store.js";
-import { ShadowStore } from "../src/store/shadow-store.js";
+import { ConversationTracker } from "../src/proxy/conversations.js";
+import { prepare, setDirective } from "./helpers.js";
 
 const TEST_SKILL_MARKDOWN =
   "## Test Skill\n\nIgnore: genuin-joging-awkwerd-febuary";
@@ -56,29 +56,44 @@ function loadAnthropicFixture(): Record<string, unknown> {
   };
 }
 
-function makeHandlerConfig(
-  directiveStore: DirectiveStore,
-  shadowStore: ShadowStore,
+type TestHandler = {
+  config: HandlerConfig;
+  directiveStore: DirectiveStore;
+  tracker: ConversationTracker;
+};
+
+function makeHandler(
   skillMarkdown = "",
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void
-): HandlerConfig {
-  let previousSkeleton: string[] | null = null;
-
+): TestHandler {
+  const directiveStore = new DirectiveStore(null);
+  const tracker = new ConversationTracker();
   return {
     directiveStore,
-    shadowStore,
-    skillMarkdown,
-    maxTokens: 128000,
-    upstreamOpenAI: "https://api.openai.com/v1",
-    upstreamAnthropic: "https://api.anthropic.com",
-    upstreamChatGPT: "https://chatgpt.com/backend-api",
-    getLatestExactPromptTokens: () => 1000,
-    getPreviousSkeleton: () => previousSkeleton,
-    setPreviousSkeleton: (skeleton) => {
-      previousSkeleton = [...skeleton];
+    tracker,
+    config: {
+      directiveStore,
+      tracker,
+      skillMarkdown,
+      maxTokens: 128000,
+      upstreamOpenAI: "https://api.openai.com/v1",
+      upstreamAnthropic: "https://api.anthropic.com",
+      upstreamChatGPT: "https://chatgpt.com/backend-api",
+      onDebugSnapshot,
     },
-    onDebugSnapshot,
   };
+}
+
+async function transformFixture(
+  handler: TestHandler,
+  body: Record<string, unknown> = loadAnthropicFixture()
+) {
+  return transformRequest(
+    "/anthropic/v1/messages",
+    Buffer.from(JSON.stringify(body), "utf-8"),
+    { "content-type": "application/json" },
+    handler.config
+  );
 }
 
 describe("Anthropic Claude support", () => {
@@ -86,7 +101,7 @@ describe("Anthropic Claude support", () => {
     const adapter = new AnthropicMessagesAdapter();
     const ctx = adapter.parse(loadAnthropicFixture());
 
-    assignIds(ctx.items);
+    prepare(ctx);
 
     const toolCall = ctx.items.find(
       (item): item is Extract<(typeof ctx.items)[number], { kind: "tool-call" }> =>
@@ -101,7 +116,7 @@ describe("Anthropic Claude support", () => {
     expect(toolResult?.id).toBe("tool result 1.1");
 
     injectIds(ctx);
-    injectStatusLine(ctx, buildStatusSummary(1000, new ShadowStore(), 128000));
+    injectStatusLine(ctx, buildStatusSummary(1000, 0, 0, 128000));
 
     const output = adapter.serialize(ctx);
     const messages = output.messages as Array<{
@@ -184,7 +199,7 @@ describe("Anthropic Claude support", () => {
       ],
     });
 
-    assignIds(ctx.items);
+    prepare(ctx);
 
     expect(
       ctx.items.filter((item) => item.kind === "tool-call").map((item) => item.id)
@@ -240,7 +255,7 @@ describe("Anthropic Claude support", () => {
       ],
     });
 
-    assignIds(ctx.items);
+    prepare(ctx);
     injectIds(ctx);
 
     const output = adapter.serialize(ctx) as {
@@ -286,16 +301,15 @@ describe("Anthropic Claude support", () => {
       ],
     });
 
-    assignIds(ctx.items);
+    prepare(ctx);
 
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    directiveStore.set("user message 1", {
+    const directiveStore = new DirectiveStore(null);
+    setDirective(directiveStore, ctx, "user message 1", {
       type: "evict",
       mediaType: "document",
     });
 
-    applyDirectives(ctx, directiveStore, shadowStore, {
+    const applied = applyDirectives(ctx, directiveStore, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -309,37 +323,34 @@ describe("Anthropic Claude support", () => {
       { type: "text", text: "[user message 1] Read this PDF" },
       { type: "text", text: "[document evicted]" },
     ]);
-    expect(shadowStore.has("user message 1")).toBe(true);
-    expect(shadowStore.get("user message 1")?.tokenEstimate).toBe(null);
+    expect(applied).toHaveLength(1);
+    expect(applied[0].tokenEstimate).toBe(null);
   });
 
   it("collapses extra non-tool Claude blocks when a whole message is evicted", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    directiveStore.set("user message 1", { type: "evict" });
-
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(
-        JSON.stringify({
-          model: "claude-sonnet-4-5",
-          max_tokens: 4096,
-          stream: true,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "First block" },
-                { type: "text", text: "Second block" },
-              ],
-            },
+    const handler = makeHandler();
+    const body = {
+      model: "claude-sonnet-4-5",
+      max_tokens: 4096,
+      stream: true,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "First block" },
+            { type: "text", text: "Second block" },
           ],
-        }),
-        "utf-8"
-      ),
-      { "content-type": "application/json" },
-      makeHandlerConfig(directiveStore, shadowStore)
-    );
+        },
+      ],
+    };
+
+    // First request seeds the tracker so the selector can resolve.
+    await transformFixture(handler, body);
+    setDirective(handler.directiveStore, handler.tracker, "user message 1", {
+      type: "evict",
+    });
+
+    const result = await transformFixture(handler, body);
 
     expect(result).not.toBeNull();
     const output = JSON.parse(result!.body.toString("utf-8")) as {
@@ -355,19 +366,14 @@ describe("Anthropic Claude support", () => {
   });
 
   it("preserves Claude tool blocks while replacing sibling text blocks", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    directiveStore.set("user message 2", {
+    const handler = makeHandler();
+    await transformFixture(handler);
+    setDirective(handler.directiveStore, handler.tracker, "user message 2", {
       type: "replace",
       content: "Tool output acknowledged.",
     });
 
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      makeHandlerConfig(directiveStore, shadowStore)
-    );
+    const result = await transformFixture(handler);
 
     expect(result).not.toBeNull();
     const output = JSON.parse(result!.body.toString("utf-8")) as {
@@ -390,20 +396,20 @@ describe("Anthropic Claude support", () => {
   });
 
   it("evicts Claude tool results without breaking tool_use_id pairing", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    directiveStore.set("tool result 1.1", { type: "evict" });
-
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      makeHandlerConfig(directiveStore, shadowStore)
+    const handler = makeHandler();
+    await transformFixture(handler);
+    const [fingerprint] = setDirective(
+      handler.directiveStore,
+      handler.tracker,
+      "tool result 1.1",
+      { type: "evict" }
     );
+
+    const result = await transformFixture(handler);
 
     expect(result).not.toBeNull();
     expect(result?.upstreamUrl).toBe("https://api.anthropic.com/v1/messages");
-    expect(shadowStore.has("tool result 1.1")).toBe(true);
+    expect(handler.directiveStore.get(fingerprint)?.lastMatchedAt).not.toBeNull();
 
     const output = JSON.parse(result!.body.toString("utf-8")) as {
       messages: Array<{ content: Array<Record<string, unknown>> }>;
@@ -425,44 +431,33 @@ describe("Anthropic Claude support", () => {
   });
 
   it("passes through non-message Anthropic endpoints untouched", async () => {
+    const handler = makeHandler();
     const result = await transformRequest(
       "/anthropic/v1/files",
       Buffer.from(JSON.stringify({ purpose: "test" }), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+      handler.config
     );
 
     expect(result).toBeNull();
   });
 
-  it("keeps surviving directives on truncation and prunes missing ones", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    const config = makeHandlerConfig(
-      directiveStore,
-      shadowStore,
-      TEST_SKILL_MARKDOWN
-    );
+  it("keeps directives intact across truncation — absent items simply do not match", async () => {
+    const handler = makeHandler(TEST_SKILL_MARKDOWN);
+    await transformFixture(handler);
 
-    await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      config
+    const [assistantFp] = setDirective(
+      handler.directiveStore,
+      handler.tracker,
+      "assistant message 1.1",
+      { type: "evict" }
     );
-
-    directiveStore.set("assistant message 1.1", { type: "evict" });
-    directiveStore.set("user message 2", { type: "evict" });
-    shadowStore.save("assistant message 1.1", {
-      originalOutput: "",
-      originalContent: [{ type: "text", text: "I'll inspect that file." }],
-      tokenEstimate: 10,
-    });
-    shadowStore.save("user message 2", {
-      originalOutput: "",
-      originalContent: [{ type: "text", text: "Continue with the next step." }],
-      tokenEstimate: 20,
-    });
+    const [userFp] = setDirective(
+      handler.directiveStore,
+      handler.tracker,
+      "user message 2",
+      { type: "evict" }
+    );
 
     const truncated = {
       model: "claude-sonnet-4-5",
@@ -489,48 +484,35 @@ describe("Anthropic Claude support", () => {
       ],
     };
 
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(truncated), "utf-8"),
-      { "content-type": "application/json" },
-      config
-    );
+    const result = await transformFixture(handler, truncated);
 
     expect(result).not.toBeNull();
-    expect(directiveStore.has("assistant message 1.1")).toBe(true);
-    expect(directiveStore.has("user message 2")).toBe(false);
-    expect(shadowStore.has("assistant message 1.1")).toBe(true);
-    expect(shadowStore.has("user message 2")).toBe(false);
+    // Nothing is pruned anymore: both directives survive. The one whose
+    // content is absent is simply inert on this request.
+    expect(handler.directiveStore.has(assistantFp)).toBe(true);
+    expect(handler.directiveStore.has(userFp)).toBe(true);
 
     const output = JSON.parse(result!.body.toString("utf-8")) as {
       messages: Array<{ content: string | Array<Record<string, unknown>> }>;
     };
-    const firstUser = output.messages[0].content;
-    expect(firstUser).toBe(
-      "[user message 1] ## Test Skill\n\nIgnore: genuin-joging-awkwerd-febuary\n\nRead src/app.ts\n\n[context-surgeon: 1,000/128,000 tokens (0.8%) | 1 evicted]"
-    );
+    const assistantBlocks = output.messages[1].content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+    expect(assistantBlocks[0]).toMatchObject({
+      type: "text",
+      text: "[assistant message 1.1] [evicted]",
+    });
   });
 
-  it("does not prune directives from Claude Code auxiliary title requests", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    const config = makeHandlerConfig(
-      directiveStore,
-      shadowStore,
-      TEST_SKILL_MARKDOWN
-    );
+  it("leaves directives untouched when unrelated single-message requests interleave", async () => {
+    const handler = makeHandler(TEST_SKILL_MARKDOWN);
+    await transformFixture(handler);
 
-    await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      config
+    const [fingerprint] = setDirective(
+      handler.directiveStore,
+      handler.tracker,
+      "assistant message 1.1",
+      { type: "replace", content: "summary kept through title request" }
     );
-
-    directiveStore.set("assistant message 1.1", {
-      type: "replace",
-      content: "summary kept through title request",
-    });
 
     const titleRequest = {
       model: "claude-sonnet-4-5",
@@ -554,29 +536,16 @@ describe("Anthropic Claude support", () => {
       messages: [
         {
           role: "user",
-          content: "Read src/app.ts",
+          content: "Summarize this session please",
         },
       ],
     };
 
-    const titleResult = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(titleRequest), "utf-8"),
-      { "content-type": "application/json" },
-      config
-    );
+    const titleResult = await transformFixture(handler, titleRequest);
+    expect(titleResult).not.toBeNull();
+    expect(handler.directiveStore.has(fingerprint)).toBe(true);
 
-    expect(titleResult?.updatesConversationState).toBe(false);
-    expect(directiveStore.has("assistant message 1.1")).toBe(true);
-
-    const mainResult = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      config
-    );
-
-    expect(mainResult?.updatesConversationState).toBe(true);
+    const mainResult = await transformFixture(handler);
     const output = JSON.parse(mainResult!.body.toString("utf-8")) as {
       messages: Array<{ content: string | Array<Record<string, unknown>> }>;
     };
@@ -588,28 +557,16 @@ describe("Anthropic Claude support", () => {
     });
   });
 
-  it("clears directive state and re-injects the skill prompt on full rewrite", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    const config = makeHandlerConfig(
-      directiveStore,
-      shadowStore,
-      TEST_SKILL_MARKDOWN
-    );
+  it("keeps directives across a full conversation rewrite and still re-injects the skill", async () => {
+    const handler = makeHandler(TEST_SKILL_MARKDOWN);
+    await transformFixture(handler);
 
-    await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      config
+    const [fingerprint] = setDirective(
+      handler.directiveStore,
+      handler.tracker,
+      "assistant message 1.1",
+      { type: "evict" }
     );
-
-    directiveStore.set("assistant message 1.1", { type: "evict" });
-    shadowStore.save("assistant message 1.1", {
-      originalOutput: "",
-      originalContent: [{ type: "text", text: "I'll inspect that file." }],
-      tokenEstimate: 10,
-    });
 
     const rewritten = {
       model: "claude-sonnet-4-5",
@@ -628,16 +585,12 @@ describe("Anthropic Claude support", () => {
       ],
     };
 
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(rewritten), "utf-8"),
-      { "content-type": "application/json" },
-      config
-    );
+    const result = await transformFixture(handler, rewritten);
 
     expect(result).not.toBeNull();
-    expect(directiveStore.size()).toBe(0);
-    expect(shadowStore.size()).toBe(0);
+    // A different conversation no longer wipes anything.
+    expect(handler.directiveStore.has(fingerprint)).toBe(true);
+    expect(handler.directiveStore.size()).toBe(1);
 
     const output = JSON.parse(result!.body.toString("utf-8")) as {
       messages: Array<{ content: string | Array<Record<string, unknown>> }>;
@@ -649,9 +602,21 @@ describe("Anthropic Claude support", () => {
     expect(firstUser).toContain("[user message 1] ## Test Skill");
     expect(firstUser).toContain("Start over with a clean session");
     expect(firstUser).toContain("[context-surgeon:");
+
+    // And the original conversation still gets its eviction when it returns.
+    const back = await transformFixture(handler);
+    const backOutput = JSON.parse(back!.body.toString("utf-8")) as {
+      messages: Array<{ content: string | Array<Record<string, unknown>> }>;
+    };
+    const assistantBlocks = backOutput.messages[1].content;
+    expect(assistantBlocks[0]).toMatchObject({
+      type: "text",
+      text: "[assistant message 1.1] [evicted]",
+    });
   });
 
   it("does not prepend the skill again when the signature is already present", async () => {
+    const handler = makeHandler(TEST_SKILL_MARKDOWN);
     const signedRequest = {
       model: "claude-sonnet-4-5",
       max_tokens: 4096,
@@ -666,16 +631,7 @@ describe("Anthropic Claude support", () => {
       ],
     };
 
-    const result = await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(signedRequest), "utf-8"),
-      { "content-type": "application/json" },
-      makeHandlerConfig(
-        new DirectiveStore(),
-        new ShadowStore(),
-        TEST_SKILL_MARKDOWN
-      )
-    );
+    const result = await transformFixture(handler, signedRequest);
 
     expect(result).not.toBeNull();
 
@@ -692,20 +648,11 @@ describe("Anthropic Claude support", () => {
 
   it("captures a debug snapshot of the transformed Claude request", async () => {
     let captured: DebugSnapshotInput | null = null;
+    const handler = makeHandler("", (snapshot) => {
+      captured = snapshot;
+    });
 
-    await transformRequest(
-      "/anthropic/v1/messages",
-      Buffer.from(JSON.stringify(loadAnthropicFixture()), "utf-8"),
-      { "content-type": "application/json" },
-      makeHandlerConfig(
-        new DirectiveStore(),
-        new ShadowStore(),
-        "",
-        (snapshot) => {
-          captured = snapshot;
-        }
-      )
-    );
+    await transformFixture(handler);
 
     expect(captured).not.toBeNull();
     expect(captured?.path).toBe("/anthropic/v1/messages");
@@ -730,15 +677,14 @@ describe("Anthropic Claude support", () => {
   it("supports the shared pipeline directly on Anthropic messages", () => {
     const adapter = new AnthropicMessagesAdapter();
     const ctx = adapter.parse(loadAnthropicFixture());
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
+    const directiveStore = new DirectiveStore(null);
 
-    assignIds(ctx.items);
-    directiveStore.set("tool result 1.1", {
+    prepare(ctx);
+    setDirective(directiveStore, ctx, "tool result 1.1", {
       type: "replace",
       content: "Express app bootstrap line",
     });
-    applyDirectives(ctx, directiveStore, shadowStore, {
+    const applied = applyDirectives(ctx, directiveStore, {
       textCharStats: computeTextCharStats(ctx),
       latestExactPromptTokens: 1000,
     });
@@ -753,9 +699,8 @@ describe("Anthropic Claude support", () => {
       tool_use_id: "toolu_abc123",
       content: "[tool result 1.1] Express app bootstrap line",
     });
-    expect(shadowStore.get("tool result 1.1")?.originalOutput).toBe(
-      "const app = express();"
-    );
+    expect(applied).toHaveLength(1);
+    expect(applied[0].itemId).toBe("tool result 1.1");
   });
 
   it("does not append a status-only sibling onto a pure tool_result turn", () => {
@@ -793,9 +738,9 @@ describe("Anthropic Claude support", () => {
       ],
     });
 
-    assignIds(ctx.items);
+    prepare(ctx);
     injectIds(ctx);
-    injectStatusLine(ctx, buildStatusSummary(1000, new ShadowStore(), 128000));
+    injectStatusLine(ctx, buildStatusSummary(1000, 0, 0, 128000));
 
     const output = adapter.serialize(ctx);
     const userBlocks = (output.messages as Array<{ content: Array<Record<string, unknown>> }>)[2]

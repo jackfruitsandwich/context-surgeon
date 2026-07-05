@@ -66,13 +66,19 @@ When editing a tool result, prefer the full tool-result ID such as
 `[tool result 4.1]`. If you pass only the bare short ID like `4.1`,  
 `context-surgeon` treats it as shorthand for the tool result.
 
-`restore` removes only the exact directive you name. If content was evicted
-with a broad selector (e.g. a whole `turn N`), restoring a single item inside
-it (`assistant message N.1`) appears to succeed but the item is re-evicted on
-the next request, because the broader directive still covers it. Restore the
-same id you evicted — run `status` first to see the active directive keys, then
-`restore` that exact key. To keep part of a turn evicted, restore the whole
-turn and re-evict the part you don't want.
+Broad selectors (like a whole `turn N`) expand into one directive per item at
+the moment you run the command, so `restore` works at any granularity:
+restoring `assistant message N.1` removes just that item's directive even if
+it was originally evicted as part of `turn N`, and restoring `turn N` removes
+every directive inside the turn.
+
+Directives are keyed to the exact content they target and **persist on disk**:
+they survive proxy restarts, session resumes, forks/branches, and are never
+affected by other sessions, subagents, or background requests. You do NOT need
+to re-issue directives — once set, an eviction stays applied until you restore
+it. If `status` shows a directive as `inactive`, its content is simply not part
+of the current conversation (e.g. it belongs to another session); that is
+harmless.
 
 For bulk cleanup, prefer selector flags over many separate shell calls. Example:
 
@@ -102,6 +108,7 @@ This records separate directives for each selected target. Whole-turn selectors 
 - Media-only eviction is reliable for Claude media units and Codex user-image messages. Do not rely on it yet for Codex tool results that contain images.
 - You can always `restore` evicted content if you need it again, or re-fetch/re-read the original source
 - The status line at the end of each user message shows your current context usage — use it to decide when to prune
+- **Batch evictions at natural phase boundaries instead of issuing them one at a time across many turns.** Every change to already-sent history invalidates the API's prompt cache from that point on, so one consolidated eviction pass is much cheaper than the same evictions spread over ten turns. Never toggle content (evict → restore → evict) without a strong reason.
 
 ### When something is genuinely unexplained, delegate diagnosis
 

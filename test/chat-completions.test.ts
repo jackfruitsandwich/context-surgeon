@@ -8,7 +8,8 @@ import {
   type HandlerConfig,
 } from "../src/proxy/handler.js";
 import { DirectiveStore } from "../src/store/directive-store.js";
-import { ShadowStore } from "../src/store/shadow-store.js";
+import { ConversationTracker } from "../src/proxy/conversations.js";
+import { setDirective } from "./helpers.js";
 
 const TEST_SKILL_MARKDOWN =
   "## Test Skill\n\nIgnore: genuin-joging-awkwerd-febuary";
@@ -65,25 +66,18 @@ function loadChatFixture(): Record<string, unknown> {
 }
 
 function makeHandlerConfig(
-  directiveStore: DirectiveStore,
-  shadowStore: ShadowStore,
+  directiveStore: DirectiveStore = new DirectiveStore(null),
+  tracker: ConversationTracker = new ConversationTracker(),
   skillMarkdown = ""
 ): HandlerConfig {
-  let previousSkeleton: string[] | null = null;
-
   return {
     directiveStore,
-    shadowStore,
+    tracker,
     skillMarkdown,
     maxTokens: 128000,
     upstreamOpenAI: "https://api.openai.com/v1",
     upstreamAnthropic: "https://api.anthropic.com",
     upstreamChatGPT: "https://chatgpt.com/backend-api",
-    getLatestExactPromptTokens: () => 1000,
-    getPreviousSkeleton: () => previousSkeleton,
-    setPreviousSkeleton: (skeleton) => {
-      previousSkeleton = [...skeleton];
-    },
   };
 }
 
@@ -123,7 +117,7 @@ describe("OpenAIChatCompletionsAdapter", () => {
 
     assignIds(ctx.items);
     injectIds(ctx);
-    injectStatusLine(ctx, buildStatusSummary(1000, new ShadowStore(), 128000));
+    injectStatusLine(ctx, buildStatusSummary(1000, 0, 0, 128000));
 
     const output = adapter.serialize(ctx);
     expect(output.model).toBe("gpt-4o");
@@ -213,7 +207,7 @@ describe("transformRequest for chat completions", () => {
       "/v1/chat/completions",
       Buffer.from(JSON.stringify(loadChatFixture()), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+      makeHandlerConfig()
     );
 
     expect(result).not.toBeNull();
@@ -244,7 +238,7 @@ describe("transformRequest for chat completions", () => {
       "/v1/chat/completions",
       Buffer.from(JSON.stringify(body), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+      makeHandlerConfig()
     );
 
     expect(result).not.toBeNull();
@@ -273,7 +267,7 @@ describe("transformRequest for chat completions", () => {
       "/v1/chat/completions",
       Buffer.from(JSON.stringify(body), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+      makeHandlerConfig()
     );
 
     const parsed = JSON.parse(result!.body.toString("utf-8")) as Record<
@@ -304,7 +298,7 @@ describe("transformRequest for chat completions", () => {
       "/v1/chat/completions",
       Buffer.from(JSON.stringify(body), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore(), TEST_SKILL_MARKDOWN)
+      makeHandlerConfig(undefined, undefined, TEST_SKILL_MARKDOWN)
     );
 
     expect(result).not.toBeNull();
@@ -332,7 +326,7 @@ describe("transformRequest for chat completions", () => {
       "/chat/completions",
       Buffer.from(JSON.stringify(loadChatFixture()), "utf-8"),
       { "content-type": "application/json" },
-      makeHandlerConfig(new DirectiveStore(), new ShadowStore())
+      makeHandlerConfig()
     );
 
     expect(result).not.toBeNull();
@@ -342,9 +336,9 @@ describe("transformRequest for chat completions", () => {
   });
 
   it("applies evict directives to tool results", async () => {
-    const directiveStore = new DirectiveStore();
-    const shadowStore = new ShadowStore();
-    const config = makeHandlerConfig(directiveStore, shadowStore);
+    const directiveStore = new DirectiveStore(null);
+    const tracker = new ConversationTracker();
+    const config = makeHandlerConfig(directiveStore, tracker);
 
     // First request establishes IDs
     await transformRequest(
@@ -354,7 +348,7 @@ describe("transformRequest for chat completions", () => {
       config
     );
 
-    directiveStore.set("tool result 1.1", { type: "evict" });
+    setDirective(directiveStore, tracker, "tool result 1.1", { type: "evict" });
 
     const result = await transformRequest(
       "/v1/chat/completions",
@@ -372,11 +366,7 @@ describe("transformRequest for chat completions", () => {
   });
 
   it("prepends the skill to the first user message exactly once", async () => {
-    const config = makeHandlerConfig(
-      new DirectiveStore(),
-      new ShadowStore(),
-      TEST_SKILL_MARKDOWN
-    );
+    const config = makeHandlerConfig(undefined, undefined, TEST_SKILL_MARKDOWN);
 
     const result = await transformRequest(
       "/v1/chat/completions",

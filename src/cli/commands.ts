@@ -1,23 +1,29 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { isToolCallDirectiveKey } from "../context/directive-targets.js";
 
 const CONTROL_RETRY_DELAYS_MS = [0, 150, 500];
 
 type StatusDirectiveRow = {
   id: string;
+  fingerprint: string;
   action: string;
   tokens: number | null;
-  tokenState: "known" | "pending" | "unknown";
+  state: "applied" | "pending" | "inactive";
+  preview: string;
 };
 
 type StatusResponse = {
   summary: {
     statusLine: string;
+    conversation: { preview: string; itemCount: number } | null;
   };
   activeDirectives: StatusDirectiveRow[];
 };
+
+export function isToolCallDirectiveKey(key: string): boolean {
+  return /^tool call \d+(?:\.\d+)?$/.test(key);
+}
 
 type SkeletonRow = {
   id: string;
@@ -39,11 +45,77 @@ type SkeletonResponse = {
   items: SkeletonRow[];
 };
 
+type PortRecord = {
+  pid: number;
+  port: number;
+  target?: string;
+  startedAt?: string;
+};
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readLivePortRecords(): PortRecord[] {
+  const portsDir = join(homedir(), ".context-surgeon", "ports");
+  let files: string[];
+  try {
+    files = readdirSync(portsDir);
+  } catch {
+    return [];
+  }
+
+  const records: PortRecord[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const parsed = JSON.parse(
+        readFileSync(join(portsDir, file), "utf-8")
+      ) as PortRecord;
+      if (
+        typeof parsed.pid === "number" &&
+        typeof parsed.port === "number" &&
+        isProcessAlive(parsed.pid)
+      ) {
+        records.push(parsed);
+      }
+    } catch {
+      // unreadable record — ignore
+    }
+  }
+  return records;
+}
+
 function getPort(): string {
-  // Try env var first, then fall back to port file
+  // The env var pins commands to the session's own proxy — always preferred.
   if (process.env.CONTEXT_SURGEON_PORT) {
     return process.env.CONTEXT_SURGEON_PORT;
   }
+
+  const live = readLivePortRecords();
+  if (live.length === 1) {
+    return String(live[0].port);
+  }
+  if (live.length > 1) {
+    const listing = live
+      .map(
+        (record) =>
+          `  port ${record.port} — ${record.target ?? "?"} (pid ${record.pid}, started ${record.startedAt ?? "?"})`
+      )
+      .join("\n");
+    throw new Error(
+      `${live.length} context-surgeon proxies are running and CONTEXT_SURGEON_PORT is not set — ` +
+        `refusing to guess which session you mean:\n${listing}\n` +
+        `Set CONTEXT_SURGEON_PORT=<port> to target one.`
+    );
+  }
+
+  // Legacy single-port file (older proxies).
   try {
     const portFile = join(homedir(), ".context-surgeon", "port");
     return readFileSync(portFile, "utf-8").trim();
@@ -386,17 +458,22 @@ function parseOccurrences(args: string[]): number[] | null {
 }
 
 function formatDirectiveTokens(directive: StatusDirectiveRow): string {
-  if (directive.tokenState === "pending") {
-    return "pending";
-  }
-  if (directive.tokenState === "unknown" || directive.tokens === null) {
-    return "unknown";
+  if (directive.tokens === null) {
+    return directive.state === "pending" ? "pending" : "unknown";
   }
   return `${directive.tokens.toLocaleString()} tokens`;
 }
 
 export function formatStatusOutput(result: StatusResponse): string {
-  const lines = [result.summary.statusLine, "", "Active directives:"];
+  const lines = [result.summary.statusLine];
+
+  if (result.summary.conversation) {
+    lines.push(
+      `Conversation: "${result.summary.conversation.preview}" (${result.summary.conversation.itemCount} items)`
+    );
+  }
+
+  lines.push("", "Directives (persisted):");
 
   if (result.activeDirectives.length === 0) {
     lines.push("none");
@@ -407,7 +484,19 @@ export function formatStatusOutput(result: StatusResponse): string {
     lines.push(
       `${directive.id} | ${directive.action} | ${formatDirectiveTokens(
         directive
-      )}`
+      )} | ${directive.state}`
+    );
+  }
+
+  const inactive = result.activeDirectives.filter(
+    (directive) => directive.state === "inactive"
+  ).length;
+  if (inactive > 0) {
+    lines.push(
+      "",
+      `${inactive} directive(s) are 'inactive': their content is not part of the` +
+        " current conversation (other session, or history changed). They are" +
+        " harmless and will be garbage-collected after 30 days."
     );
   }
 
@@ -640,15 +729,12 @@ export async function runCommand(args: string[]): Promise<void> {
         break;
       }
 
-      for (const id of ids) {
-        const result = await post("/_control/evict", {
-          id,
-          mediaType: mediaType ?? undefined,
-          occurrences: occurrences ?? undefined,
-        });
-        void result;
-      }
-      console.log(ids.length === 1 ? "ok" : `ok (${ids.length} directives)`);
+      const result = (await post("/_control/evict", {
+        ids,
+        mediaType: mediaType ?? undefined,
+        occurrences: occurrences ?? undefined,
+      })) as { message?: string; resolvedCount?: number };
+      console.log(result.message ?? "ok");
       break;
     }
 
@@ -664,9 +750,10 @@ export async function runCommand(args: string[]): Promise<void> {
         );
         process.exit(1);
       }
-      const result = await post("/_control/replace", { id, content });
-      void result;
-      console.log("ok");
+      const result = (await post("/_control/replace", { ids: [id], content })) as {
+        message?: string;
+      };
+      console.log(result.message ?? "ok");
       break;
     }
 
@@ -676,9 +763,10 @@ export async function runCommand(args: string[]): Promise<void> {
         console.error("Usage: context-surgeon restore <id>");
         process.exit(1);
       }
-      const result = await post("/_control/restore", { id });
-      void result;
-      console.log("ok");
+      const result = (await post("/_control/restore", { ids: [id] })) as {
+        message?: string;
+      };
+      console.log(result.message ?? "ok");
       break;
     }
 

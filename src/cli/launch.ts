@@ -76,9 +76,56 @@ function userConfigHasTopLevelModelProvider(): boolean {
   return false;
 }
 
-async function startConfiguredProxy(): Promise<{
+function loadPackageVersion(): string {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8")
+    ) as { version?: string };
+    return parsed.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+type PortCleanup = () => void;
+
+/**
+ * Every proxy writes its own record under ports/; the legacy single `port`
+ * file is kept for older CLI binaries but is only removed on exit if it still
+ * holds our port (a newer session may have overwritten it).
+ */
+function registerPortFiles(port: number, target: string): PortCleanup {
+  const baseDir = join(homedir(), ".context-surgeon");
+  const portsDir = join(baseDir, "ports");
+  mkdirSync(portsDir, { recursive: true });
+
+  const recordPath = join(portsDir, `${port}.json`);
+  writeFileSync(
+    recordPath,
+    JSON.stringify({
+      pid: process.pid,
+      port,
+      target,
+      startedAt: new Date().toISOString(),
+    })
+  );
+
+  const legacyPath = join(baseDir, "port");
+  writeFileSync(legacyPath, String(port));
+
+  return () => {
+    try { unlinkSync(recordPath); } catch {}
+    try {
+      if (readFileSync(legacyPath, "utf-8").trim() === String(port)) {
+        unlinkSync(legacyPath);
+      }
+    } catch {}
+  };
+}
+
+async function startConfiguredProxy(target: string): Promise<{
   proxy: Awaited<ReturnType<typeof startProxy>>;
-  portFile: string;
+  cleanupPortFiles: PortCleanup;
 }> {
   const skillMarkdown = loadSkillMarkdown();
 
@@ -107,14 +154,13 @@ async function startConfiguredProxy(): Promise<{
     upstreamOpenAI,
     upstreamAnthropic,
     upstreamChatGPT,
+    target,
+    version: loadPackageVersion(),
   });
 
-  const portDir = join(homedir(), ".context-surgeon");
-  mkdirSync(portDir, { recursive: true });
-  const portFile = join(portDir, "port");
-  writeFileSync(portFile, String(proxy.port));
+  const cleanupPortFiles = registerPortFiles(proxy.port, target);
 
-  return { proxy, portFile };
+  return { proxy, cleanupPortFiles };
 }
 
 /**
@@ -124,7 +170,7 @@ async function startConfiguredProxy(): Promise<{
  * Cursor → Settings → Models → API Keys → "Override OpenAI Base URL".
  */
 export async function launchCursor(extraArgs: string[]): Promise<void> {
-  const { proxy, portFile } = await startConfiguredProxy();
+  const { proxy, cleanupPortFiles } = await startConfiguredProxy("cursor");
   const localBase = `http://127.0.0.1:${proxy.port}/v1`;
   const noTunnel = extraArgs.includes("--no-tunnel");
 
@@ -133,7 +179,7 @@ export async function launchCursor(extraArgs: string[]): Promise<void> {
     if (summary) {
       console.error(`\n${summary}`);
     }
-    try { unlinkSync(portFile); } catch {}
+    cleanupPortFiles();
     proxy.close();
     process.exit(code);
   }
@@ -216,7 +262,7 @@ export async function launch(
   target: Target,
   extraArgs: string[]
 ): Promise<void> {
-  const { proxy, portFile } = await startConfiguredProxy();
+  const { proxy, cleanupPortFiles } = await startConfiguredProxy(target);
 
   const childEnv = { ...process.env };
   childEnv.CONTEXT_SURGEON_PORT = String(proxy.port);
@@ -259,7 +305,7 @@ export async function launch(
     childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}/anthropic`;
   }
 
-  await launchWrapped(target, extraArgs, childEnv, proxy, portFile);
+  await launchWrapped(target, extraArgs, childEnv, proxy, cleanupPortFiles);
 }
 
 async function launchWrapped(
@@ -271,7 +317,7 @@ async function launchWrapped(
     close: () => void;
     getShutdownDirectiveSummary: () => string | null;
   },
-  portFile: string
+  cleanupPortFiles: PortCleanup
 ): Promise<void> {
   const { spawn } = await import("node:child_process");
   let printedShutdownSummary = false;
@@ -296,7 +342,7 @@ async function launchWrapped(
 
   child.on("exit", (code) => {
     printShutdownSummary();
-    try { unlinkSync(portFile); } catch {}
+    cleanupPortFiles();
     proxy.close();
     process.exit(code ?? 0);
   });

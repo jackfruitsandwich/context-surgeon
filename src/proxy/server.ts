@@ -2,10 +2,9 @@ import http from "node:http";
 import net from "node:net";
 import { URL } from "node:url";
 import type { Directive } from "../context/types.js";
-import type { SkeletonItem } from "../context/skeleton.js";
-import { DirectiveStore } from "../store/directive-store.js";
-import { ShadowStore } from "../store/shadow-store.js";
-import { handleControl } from "../api/control.js";
+import { DirectiveStore, defaultDirectivesPath } from "../store/directive-store.js";
+import { ConversationTracker } from "./conversations.js";
+import { handleControl, type ControlContext } from "../api/control.js";
 import { transformRequest, type HandlerConfig } from "./handler.js";
 import { forwardToUpstream } from "./stream.js";
 
@@ -15,6 +14,10 @@ export type ProxyServerOptions = {
   upstreamOpenAI: string;
   upstreamAnthropic: string;
   upstreamChatGPT: string;
+  target?: string;
+  version?: string;
+  /** Override the persistence path; null disables persistence (tests). */
+  directivesPath?: string | null;
 };
 
 export type ProxyServer = {
@@ -72,44 +75,54 @@ function describeDirectiveAction(directive: Directive): string {
 function buildShutdownDirectiveSummary(
   directiveStore: DirectiveStore
 ): string | null {
-  const rows = [...directiveStore.getAll().entries()]
-    .map(([id, directive]) => `${id} | ${describeDirectiveAction(directive)}`)
+  const rows = [...directiveStore.getAll().values()]
+    .map((entry) => `${entry.humanId} | ${describeDirectiveAction(entry.directive)}`)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
   if (rows.length === 0) {
     return null;
   }
 
-  return ["Active directives:", ...rows].join("\n");
+  return [
+    "Directives (persisted — they re-apply automatically on resume):",
+    ...rows,
+  ].join("\n");
 }
 
 export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
-  const directiveStore = new DirectiveStore();
-  const shadowStore = new ShadowStore();
-  let latestExactPromptTokens: number | null = null;
-  let latestPromptTokens: number | null = null;
-  let previousSkeleton: string[] | null = null;
-  let currentSkeletonItems: SkeletonItem[] | null = null;
+  const directiveStore = new DirectiveStore(
+    opts.directivesPath === undefined ? defaultDirectivesPath() : opts.directivesPath
+  );
+  const tracker = new ConversationTracker();
 
   const handlerConfig: HandlerConfig = {
     directiveStore,
-    shadowStore,
+    tracker,
     skillMarkdown: opts.skillMarkdown,
     maxTokens: opts.maxTokens,
     upstreamOpenAI: opts.upstreamOpenAI,
     upstreamAnthropic: opts.upstreamAnthropic,
     upstreamChatGPT: opts.upstreamChatGPT,
-    getLatestExactPromptTokens: () => latestExactPromptTokens,
-    getPreviousSkeleton: () => previousSkeleton,
-    setPreviousSkeleton: (skeleton) => {
-      previousSkeleton = [...skeleton];
-    },
-    setCurrentSkeletonItems: (items) => {
-      currentSkeletonItems = items.map((item) => ({ ...item }));
-    },
   };
 
   const debug = !!process.env.CONTEXT_SURGEON_DEBUG;
+  const startedAt = new Date().toISOString();
+  let boundPort = 0;
+
+  function controlContext(): ControlContext {
+    return {
+      directiveStore,
+      tracker,
+      maxTokens: opts.maxTokens,
+      identity: {
+        pid: process.pid,
+        port: boundPort,
+        target: opts.target ?? "unknown",
+        startedAt,
+        version: opts.version ?? "unknown",
+      },
+    };
+  }
 
   const server = http.createServer(async (req, res) => {
     const url = req.url || "";
@@ -124,15 +137,7 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
     try {
       // Control API
       if (url.startsWith("/_control")) {
-        await handleControl(
-          req,
-          res,
-          directiveStore,
-          shadowStore,
-          latestPromptTokens,
-          opts.maxTokens,
-          currentSkeletonItems
-        );
+        await handleControl(req, res, controlContext());
         return;
       }
 
@@ -172,6 +177,13 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         );
 
         if (!result) {
+          // A transformable-looking request we could not parse. Forward it
+          // untouched, but never silently: directives are NOT applied here.
+          console.error(
+            `[context-surgeon] WARNING: could not transform ${method} ${url} ` +
+              `(encoding=${incomingHeaders["content-encoding"] ?? "none"}, ` +
+              `${rawBody.length} bytes) — forwarded unmodified, directives NOT applied`
+          );
           // Determine upstream for raw forward
           let rawUpstream: string;
           if (url.includes("/codex/responses")) {
@@ -207,18 +219,13 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
             format: result.format,
             translateResponse: result.translateResponse,
             onPromptTokens: (tokens) => {
-              if (!result.updatesConversationState) {
-                return;
+              if (result.rootFingerprint) {
+                tracker.notePromptTokens(result.rootFingerprint, tokens);
               }
-              latestExactPromptTokens = tokens;
-              latestPromptTokens = tokens;
             },
           },
           res
         );
-        if (result.updatesConversationState) {
-          latestPromptTokens = result.statusSummary.promptTokens;
-        }
         return;
       }
 
@@ -374,11 +381,15 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         return;
       }
       const port = addr.port;
+      boundPort = port;
       console.error(`[context-surgeon] Proxy listening on 127.0.0.1:${port}`);
       resolve({
         port,
         server,
-        close: () => server.close(),
+        close: () => {
+          directiveStore.close();
+          server.close();
+        },
         getShutdownDirectiveSummary: () =>
           buildShutdownDirectiveSummary(directiveStore),
       });

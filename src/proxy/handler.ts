@@ -1,32 +1,29 @@
 import zlib from "node:zlib";
 import { promisify } from "node:util";
 import type {
-  ContextItem,
   ContextObject,
   ContentBlock,
-  Directive,
   FormatAdapter,
 } from "../context/types.js";
 import type { DirectiveStore } from "../store/directive-store.js";
-import type { ShadowStore } from "../store/shadow-store.js";
 import { assignIds } from "../context/id-assigner.js";
+import { computeFingerprints } from "../context/fingerprint.js";
 import {
   injectIds,
   injectStatusLine,
   prependTextToFirstUserMessage,
 } from "../context/injector.js";
-import { applyDirectives } from "../context/transformer.js";
+import { applyDirectives, type AppliedDirective } from "../context/transformer.js";
 import {
   buildStatusSummary,
   computeTextCharStats,
   estimateTokensFromChars,
   type StatusSummary,
 } from "../context/status.js";
-import { buildSkeletonItems, type SkeletonItem } from "../context/skeleton.js";
+import type { ConversationTracker } from "./conversations.js";
 import { AnthropicMessagesAdapter } from "../adapters/anthropic-messages.js";
 import { OpenAIResponsesAdapter } from "../adapters/openai-responses.js";
 import { OpenAIChatCompletionsAdapter } from "../adapters/openai-chat-completions.js";
-import { directiveKeyMatchesItemId } from "../context/directive-targets.js";
 
 /** Snapshot passed to optional hooks (e.g. tests). */
 export type DebugSnapshotInput = {
@@ -35,26 +32,20 @@ export type DebugSnapshotInput = {
   format: SupportedFormat;
   upstreamUrl: string;
   systemPrompt: string;
-  items: ContextItem[];
-  directives: Record<string, string>;
-  shadowEntries: Record<string, number | null>;
-  totalEvictedTokens: number;
+  items: ContextObject["items"];
+  applied: AppliedDirective[];
   statusSummary: StatusSummary;
   rawRequest: Record<string, unknown>;
 };
 
 export type HandlerConfig = {
   directiveStore: DirectiveStore;
-  shadowStore: ShadowStore;
+  tracker: ConversationTracker;
   skillMarkdown: string;
   maxTokens: number;
   upstreamOpenAI: string;
   upstreamAnthropic: string;
   upstreamChatGPT: string;
-  getLatestExactPromptTokens: () => number | null;
-  getPreviousSkeleton: () => string[] | null;
-  setPreviousSkeleton: (skeleton: string[]) => void;
-  setCurrentSkeletonItems?: (items: SkeletonItem[]) => void;
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void;
 };
 
@@ -64,7 +55,7 @@ type TransformResult = {
   headers: Record<string, string>;
   format: SupportedFormat;
   statusSummary: StatusSummary;
-  updatesConversationState: boolean;
+  rootFingerprint: string | null;
   translateResponse?: "responses-to-chat";
 };
 
@@ -84,8 +75,6 @@ type ZlibWithOptionalZstd = typeof zlib & {
     callback: (error: Error | null, result: Buffer) => void
   ) => void;
 };
-
-type HistoryTransition = "append" | "truncate" | "rewrite";
 
 function detectFormat(path: string): SupportedFormat | null {
   if (path.startsWith("/v1/responses")) return "openai-responses";
@@ -193,113 +182,6 @@ function buildUpstreamHeaders(
   return headers;
 }
 
-function snapshotDirectives(
-  directiveStore: DirectiveStore
-): Record<string, string> {
-  const directives: Record<string, string> = {};
-  for (const [id, directive] of directiveStore.getAll()) {
-    directives[id] = describeDirective(directive);
-  }
-  return directives;
-}
-
-function describeDirective(directive: Directive): string {
-  if (directive.type === "replace") {
-    return `replace: ${directive.content}`;
-  }
-
-  if (!directive.mediaType) {
-    return "evict";
-  }
-
-  const occurrences =
-    directive.occurrences && directive.occurrences.length > 0
-      ? ` (${directive.occurrences.join(",")})`
-      : "";
-
-  return `evict ${directive.mediaType}${occurrences}`;
-}
-
-function snapshotShadows(shadowStore: ShadowStore): Record<string, number | null> {
-  const shadows: Record<string, number | null> = {};
-  for (const [id, entry] of shadowStore.getAll()) {
-    shadows[id] = entry.tokenEstimate;
-  }
-  return shadows;
-}
-
-function buildSkeleton(items: ContextItem[]): string[] {
-  return items.map((item) => {
-    switch (item.kind) {
-      case "user-message":
-        return "u";
-      case "assistant-message":
-        return "a";
-      case "tool-call":
-        return "tc";
-      case "tool-result":
-        return "tr";
-      case "other":
-        return "o";
-    }
-  });
-}
-
-function startsWithSkeleton(full: string[], prefix: string[]): boolean {
-  if (prefix.length > full.length) {
-    return false;
-  }
-
-  for (let i = 0; i < prefix.length; i++) {
-    if (full[i] !== prefix[i]) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function classifyHistoryTransition(
-  previousSkeleton: string[] | null,
-  nextSkeleton: string[]
-): HistoryTransition {
-  if (!previousSkeleton || previousSkeleton.length === 0) {
-    return "append";
-  }
-
-  if (startsWithSkeleton(nextSkeleton, previousSkeleton)) {
-    return "append";
-  }
-
-  if (startsWithSkeleton(previousSkeleton, nextSkeleton)) {
-    return "truncate";
-  }
-
-  return "rewrite";
-}
-
-function pruneMissingDirectiveState(
-  currentIds: Set<string>,
-  directiveStore: DirectiveStore,
-  shadowStore: ShadowStore
-): void {
-  for (const [id] of directiveStore.getAll()) {
-    const stillMatchesCurrentContext = [...currentIds].some((currentId) =>
-      directiveKeyMatchesItemId(id, currentId)
-    );
-    if (!stillMatchesCurrentContext) {
-      directiveStore.delete(id);
-      shadowStore.delete(id);
-    }
-  }
-
-  for (const [id] of shadowStore.getAll()) {
-    if (!currentIds.has(id)) {
-      shadowStore.delete(id);
-    }
-  }
-}
-
 function contextHasSkillSignature(ctx: ContextObject): boolean {
   if (ctx.systemPrompt.includes(SKILL_SIGNATURE)) {
     return true;
@@ -331,92 +213,6 @@ function contextHasSkillSignature(ctx: ContextObject): boolean {
   }
 
   return false;
-}
-
-function contentBlocksToText(content: ContentBlock[]): string {
-  return content
-    .filter((block): block is { type: "text"; text: string } => block.type === "text")
-    .map((block) => block.text)
-    .join("\n");
-}
-
-function anthropicSystemText(json: Record<string, unknown>): string {
-  const system = json.system;
-  if (typeof system === "string") {
-    return system;
-  }
-  if (!Array.isArray(system)) {
-    return "";
-  }
-  return system
-    .filter(
-      (block): block is { type: "text"; text: string } =>
-        !!block &&
-        typeof block === "object" &&
-        (block as { type?: unknown }).type === "text" &&
-        typeof (block as { text?: unknown }).text === "string"
-    )
-    .map((block) => block.text)
-    .join("\n");
-}
-
-function isAnthropicTitleRequest(json: Record<string, unknown>): boolean {
-  const outputConfig = json.output_config as
-    | {
-        format?: {
-          schema?: {
-            properties?: Record<string, unknown>;
-          };
-        };
-      }
-    | undefined;
-
-  if (outputConfig?.format?.schema?.properties?.title) {
-    return true;
-  }
-
-  return anthropicSystemText(json).includes(
-    "Generate a concise, sentence-case title"
-  );
-}
-
-function isAnthropicPromptSuggestionRequest(ctx: ContextObject): boolean {
-  return ctx.items.some((item) => {
-    if (item.kind !== "user-message") {
-      return false;
-    }
-    return contentBlocksToText(item.content).includes("[SUGGESTION MODE:");
-  });
-}
-
-function isAnthropicQuotaRequest(
-  json: Record<string, unknown>,
-  ctx: ContextObject
-): boolean {
-  if (json.max_tokens !== 1 || ctx.items.length !== 1) {
-    return false;
-  }
-  const [item] = ctx.items;
-  if (item.kind !== "user-message") {
-    return false;
-  }
-  return contentBlocksToText(item.content).trim() === "quota";
-}
-
-function updatesConversationState(
-  format: SupportedFormat,
-  json: Record<string, unknown>,
-  ctx: ContextObject
-): boolean {
-  if (format !== "anthropic-messages") {
-    return true;
-  }
-
-  return !(
-    isAnthropicTitleRequest(json) ||
-    isAnthropicPromptSuggestionRequest(ctx) ||
-    isAnthropicQuotaRequest(json, ctx)
-  );
 }
 
 export async function transformRequest(
@@ -478,47 +274,44 @@ export async function transformRequest(
 
   const adapter = getAdapter(format);
   const ctx: ContextObject = adapter.parse(json);
+
+  // Fingerprints are computed on the pristine incoming content, before any
+  // injection, so they are stable across requests, resumes, and forks.
+  computeFingerprints(ctx.items);
+
   if (config.skillMarkdown.trim() && !contextHasSkillSignature(ctx)) {
     prependTextToFirstUserMessage(ctx, config.skillMarkdown.trim());
   }
-  const shouldUpdateConversationState = updatesConversationState(format, json, ctx);
-  const previousSkeleton = shouldUpdateConversationState
-    ? config.getPreviousSkeleton()
-    : null;
-  const nextSkeleton = buildSkeleton(ctx.items);
-  const historyTransition = classifyHistoryTransition(previousSkeleton, nextSkeleton);
-  if (shouldUpdateConversationState) {
-    config.setPreviousSkeleton(nextSkeleton);
-  }
-
-  if (shouldUpdateConversationState && historyTransition === "rewrite") {
-    config.directiveStore.clear();
-    config.shadowStore.clear();
-  }
-
-  const latestExactPromptTokens = config.getLatestExactPromptTokens();
 
   // Pipeline:
-  // 1. Assign IDs
+  // 1. Assign display IDs and record the conversation for selector resolution
   assignIds(ctx.items);
-  if (shouldUpdateConversationState) {
-    config.setCurrentSkeletonItems?.(buildSkeletonItems(ctx.items));
-  }
-
-  const currentIds = new Set(ctx.items.map((item) => item.id));
-  if (shouldUpdateConversationState && historyTransition === "truncate") {
-    pruneMissingDirectiveState(currentIds, config.directiveStore, config.shadowStore);
-  }
+  const rootFingerprint = config.tracker.record(ctx.items);
+  const snapshot = rootFingerprint ? config.tracker.get(rootFingerprint) : undefined;
 
   const textCharStats = computeTextCharStats(ctx);
   const promptTokensForCurrentRequest =
-    latestExactPromptTokens ?? estimateTokensFromChars(textCharStats.totalChars);
+    snapshot?.promptTokens ?? estimateTokensFromChars(textCharStats.totalChars);
 
-  // 2. Apply evict/replace directives
-  applyDirectives(ctx, config.directiveStore, config.shadowStore, {
+  // 2. Apply evict/replace directives — pure fingerprint match, no
+  //    conversation identity involved. Foreign traffic matches nothing.
+  const applied = applyDirectives(ctx, config.directiveStore, {
     textCharStats,
     latestExactPromptTokens: promptTokensForCurrentRequest,
   });
+  for (const entry of applied) {
+    config.directiveStore.noteMatched(
+      entry.fingerprint,
+      entry.itemId,
+      entry.tokenEstimate
+    );
+  }
+  if (rootFingerprint) {
+    config.tracker.noteApplied(
+      rootFingerprint,
+      applied.map((entry) => entry.fingerprint)
+    );
+  }
 
   // 3. Inject IDs into content text
   injectIds(ctx);
@@ -526,8 +319,9 @@ export async function transformRequest(
   // 4. Inject status line into last user message
   const injectedTextCharStats = computeTextCharStats(ctx);
   const statusSummary = buildStatusSummary(
-    latestExactPromptTokens ?? estimateTokensFromChars(injectedTextCharStats.totalChars),
-    config.shadowStore,
+    snapshot?.promptTokens ?? estimateTokensFromChars(injectedTextCharStats.totalChars),
+    applied.length,
+    applied.reduce((sum, entry) => sum + (entry.tokenEstimate ?? 0), 0),
     config.maxTokens
   );
   injectStatusLine(ctx, statusSummary);
@@ -549,9 +343,7 @@ export async function transformRequest(
     upstreamUrl,
     systemPrompt: ctx.systemPrompt,
     items: structuredClone(ctx.items),
-    directives: snapshotDirectives(config.directiveStore),
-    shadowEntries: snapshotShadows(config.shadowStore),
-    totalEvictedTokens: config.shadowStore.totalEvictedTokens(),
+    applied,
     statusSummary,
     rawRequest: structuredClone(outputJson),
   });
@@ -564,7 +356,7 @@ export async function transformRequest(
     headers,
     format,
     statusSummary,
-    updatesConversationState: shouldUpdateConversationState,
+    rootFingerprint,
     translateResponse,
   };
 }
