@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>context-surgeon — a session, operated on</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121a23; --panel2:#0f161d;
+    --line:#1e2a36; --line2:#2a3c50;
+    --ink:#e6edf3; --ink-dim:#8497a8; --ink-faint:#4a5b6b;
+    --user:#4ea8ff; --assistant:#aab8c5; --tcall:#f6a945;
+    --tresult:#a988ff; --system:#5d6f7e; --evict:#ff5d6c; --restore:#2fe0bd;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:
+      radial-gradient(120% 60% at 12% 0%, rgba(78,168,255,.05), transparent 45%),
+      radial-gradient(120% 60% at 92% 100%, rgba(169,136,255,.05), transparent 45%),
+      var(--bg);
+    color:var(--ink); font-family:"Space Grotesk",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:"IBM Plex Mono",monospace}
+
+  /* ── sticky vitals header ── */
+  .topbar{position:sticky;top:0;z-index:40;background:rgba(11,15,20,.86);
+    backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+  .topbar .inner{max-width:840px;margin:0 auto;padding:13px 24px;
+    display:flex;align-items:center;gap:18px}
+  .brand{display:flex;align-items:center;gap:11px;flex:none}
+  .brand .mark{width:25px;height:25px;border-radius:7px;
+    background:linear-gradient(135deg,var(--restore),var(--user));
+    display:grid;place-items:center;color:#04110f;font-weight:700;font-size:14px;
+    box-shadow:0 0 16px rgba(47,224,189,.4)}
+  .brand h1{font-size:15.5px;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+  .brand h1 span{color:var(--ink-faint);font-weight:400}
+
+  .vitals{margin-left:auto;display:flex;align-items:center;gap:14px;flex:none}
+  .vitals .read{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-dim);text-align:right}
+  .vitals .read b{color:var(--ink);transition:color .4s}
+  .vitals .read b.low{color:var(--restore)}
+  .vitals .bar{width:150px;height:9px;border-radius:6px;background:var(--panel);
+    border:1px solid var(--line);overflow:hidden;position:relative}
+  .vitals .fill{position:absolute;inset:0 auto 0 0;width:94%;
+    background:linear-gradient(90deg,var(--tresult),var(--evict));transition:width 1s cubic-bezier(.2,.8,.2,1)}
+  .vitals .fill.low{background:linear-gradient(90deg,var(--restore),var(--user))}
+  .vitals .pct{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink-faint);width:42px;text-align:right}
+
+  /* progress hairline of scroll */
+  .scrollline{height:2px;background:var(--line);position:relative}
+  .scrollline .grow{position:absolute;inset:0 auto 0 0;width:0;
+    background:linear-gradient(90deg,var(--restore),var(--user));box-shadow:0 0 8px var(--restore)}
+
+  /* ── thread ── */
+  .thread{max-width:840px;margin:0 auto;padding:30px 24px 60px}
+  .task-card{border:1px solid var(--line2);border-radius:12px;
+    background:linear-gradient(180deg,rgba(78,168,255,.06),var(--panel));
+    padding:16px 18px;margin-bottom:26px}
+  .task-card .k{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--ink-faint);margin-bottom:6px}
+  .task-card .v{font-size:15px;color:var(--ink);line-height:1.5}
+
+  .sys-pill{display:block;width:max-content;margin:0 auto 22px;
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--system);
+    border:1px solid var(--line);border-radius:20px;padding:5px 14px;background:var(--panel)}
+  .sys-pill .id{color:var(--ink-faint)}
+
+  .row{display:flex;width:100%;margin-bottom:16px}
+  .row.user{justify-content:flex-end}
+  .row.asst{justify-content:flex-start}
+
+  .bubble{border-radius:14px;border:1px solid var(--line);background:var(--panel);
+    padding:11px 15px;position:relative}
+  .bubble .who{font-family:"IBM Plex Mono",monospace;font-size:9px;letter-spacing:.12em;
+    text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:7px}
+  .bubble .who .id{color:var(--ink-faint);letter-spacing:0}
+  .bubble .text{font-size:13.5px;line-height:1.5;color:var(--ink)}
+  .bubble .text + .text{margin-top:9px}
+
+  .bubble.user{background:linear-gradient(180deg,rgba(78,168,255,.16),rgba(78,168,255,.06));
+    border-color:rgba(78,168,255,.32);border-bottom-right-radius:5px;max-width:74%}
+  .bubble.user .who{color:var(--user)}
+  .bubble.asst{border-bottom-left-radius:5px;max-width:90%}
+  .bubble.asst .who{color:var(--assistant)}
+  .bubble.asst .text{color:var(--ink-dim)}
+  .bubble.asst .text b{color:var(--ink);font-weight:600}
+  .bubble.asst .text code{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--restore);
+    background:var(--panel2);padding:1px 5px;border-radius:4px}
+
+  /* nested tool work */
+  .toolblock{margin-top:11px;border-left:2px solid var(--line2);padding-left:12px;
+    display:flex;flex-direction:column;gap:8px}
+  .tcall{display:flex;align-items:center;gap:9px;font-family:"IBM Plex Mono",monospace;font-size:11px}
+  .tcall .pin{font-size:8.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);flex:none}
+  .tcall .cmd{color:var(--tcall)}
+
+  .tresult{position:relative;border:1px dashed var(--line2);border-left:2px solid var(--tresult);
+    border-radius:9px;padding:9px 12px;background:var(--panel2);overflow:hidden;
+    transition:all .6s cubic-bezier(.2,.8,.2,1)}
+  .tresult .rhead{display:flex;align-items:center;gap:9px}
+  .tresult .pin{font-family:"IBM Plex Mono",monospace;font-size:8.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--tresult);flex:none}
+  .tresult .rhead .sum{font-size:11.5px;color:var(--ink-dim)}
+  .tresult .rhead .sum .id{font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--ink-faint)}
+  .tresult .weight{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:10px;
+    color:var(--ink-faint);transition:color .4s;flex:none}
+  .tresult .dump{margin-top:7px;display:flex;flex-direction:column;gap:3px;
+    font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--ink-faint);
+    max-height:200px;opacity:1;transition:max-height .6s ease,opacity .45s,margin .6s}
+  .tresult .dump span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .evicted-note{display:none;margin-top:7px;font-family:"IBM Plex Mono",monospace;
+    font-size:11px;color:var(--evict);align-items:center;gap:7px}
+
+  /* evicted state */
+  .tresult.evicted{background:repeating-linear-gradient(45deg,rgba(255,93,108,.06),
+    rgba(255,93,108,.06) 7px,transparent 7px,transparent 14px);border-color:rgba(255,93,108,.4)}
+  .tresult.evicted .dump{max-height:0;opacity:0;margin-top:0}
+  .tresult.evicted .pin{color:var(--evict)}
+  .tresult.evicted .weight{color:var(--restore)}
+  .tresult.evicted .evicted-note{display:flex}
+
+  .scalpel{position:absolute;top:0;bottom:0;width:36px;border-radius:9px;
+    background:linear-gradient(90deg,transparent,rgba(47,224,189,.5),transparent);
+    left:-40px;opacity:0;pointer-events:none}
+  .tresult.cutting .scalpel{animation:swipe .6s ease}
+  @keyframes swipe{0%{left:-40px;opacity:0}40%{opacity:1}100%{left:100%;opacity:0}}
+
+  /* the evict turn at the very bottom */
+  .evict-turn{border:1px solid var(--line);border-left:2px solid var(--restore);
+    border-radius:14px;background:var(--panel);padding:13px 16px;margin-top:4px;
+    opacity:.5;transition:opacity .5s,box-shadow .5s}
+  .evict-turn.fired{opacity:1;box-shadow:0 0 0 1px rgba(47,224,189,.2),0 18px 50px -34px rgba(47,224,189,.7)}
+  .evict-turn .who{font-family:"IBM Plex Mono",monospace;font-size:9px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--assistant);margin-bottom:8px}
+  .evict-turn .text{font-size:13.5px;color:var(--ink-dim);line-height:1.5}
+  .evict-cmds{margin-top:10px;border-left:2px solid var(--line2);padding-left:12px;
+    display:flex;flex-direction:column;gap:5px}
+  .evict-cmds .c{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink-faint);
+    opacity:.4;transition:opacity .3s,color .3s}
+  .evict-turn.fired .evict-cmds .c{opacity:1}
+  .evict-cmds .c .k{color:var(--restore)} .evict-cmds .c .arg{color:var(--tcall)}
+  .evict-cmds .c .ok{color:var(--restore)}
+  .reclaimed{margin-top:11px;display:none;align-items:center;gap:10px;
+    font-family:"IBM Plex Mono",monospace;font-size:12.5px}
+  .evict-turn.fired .reclaimed{display:flex}
+  .reclaimed .big{font-size:17px;color:var(--restore);font-weight:600}
+  .reclaimed .lbl{color:var(--ink-faint)}
+
+  /* floating hint */
+  .hint{position:fixed;right:22px;bottom:22px;z-index:30;
+    font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink);
+    background:rgba(18,26,35,.92);border:1px solid var(--line2);border-radius:24px;
+    padding:9px 16px;display:flex;align-items:center;gap:9px;
+    box-shadow:0 14px 40px -22px #000;transition:opacity .4s,transform .4s}
+  .hint .arrow{animation:bob 1.4s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(3px)}}
+  .hint.hidden{opacity:0;transform:translateY(10px);pointer-events:none}
+  .hint b{color:var(--restore);font-weight:600}
+
+  .endcap{text-align:center;color:var(--ink-faint);font-family:"IBM Plex Mono",monospace;
+    font-size:11px;letter-spacing:.18em;text-transform:uppercase;margin-top:40px}
+  .endcap .up{color:var(--ink-dim)}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="inner">
+      <div class="brand"><div class="mark">✚</div><h1>context-surgeon <span>/ a live session</span></h1></div>
+      <div class="vitals">
+        <div class="read">ctx <b id="tokb">120.0k</b> <span style="color:var(--ink-faint)">/128k</span></div>
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="pct" id="pct">94%</div>
+      </div>
+    </div>
+    <div class="scrollline"><div class="grow" id="grow"></div></div>
+  </div>
+
+  <div class="thread">
+    <div class="task-card">
+      <div class="k">Task · agent session · Cursor</div>
+      <div class="v">“We're getting hammered by credential-stuffing on login. Add rate limiting to the auth middleware — 5 attempts / minute / IP, return 429.”</div>
+    </div>
+
+    <span class="sys-pill"><span class="id">[skill]</span> context surgery enabled — evict · replace · restore</span>
+
+    <!-- 1 -->
+    <div class="row user"><div class="bubble user">
+      <div class="who">You <span class="id">[user 1]</span></div>
+      <div class="text">Add rate limiting to the auth middleware — 5 attempts per minute per IP, 429 on exceed. Use a library, don't hand-roll it.</div>
+    </div></div>
+
+    <!-- 2 -->
+    <div class="row asst"><div class="bubble asst">
+      <div class="who">Agent <span class="id">[asst 1]</span></div>
+      <div class="text">Let me locate the auth middleware and see how requests flow through it.</div>
+      <div class="toolblock">
+        <div class="tcall"><span class="pin">call 1.1</span><span class="cmd">grep -rn "authenticate" src/</span></div>
+        <div class="tresult target" data-tok="8200">
+          <div class="scalpel"></div>
+          <div class="rhead"><span class="pin">tool result 1.1</span>
+            <span class="sum"><span class="id">[tool result 1.1]</span> 64 matches · 21 files</span>
+            <span class="weight">8.2k tok</span></div>
+          <div class="dump">
+            <span>src/middleware/auth.ts:14  export async function authenticate(req,res,next)</span>
+            <span>src/routes/login.ts:9       const ok = await authenticate(req)</span>
+            <span>src/routes/login.ts:22      if(!ok) return res.status(401).send()</span>
+            <span>src/services/session.ts:51  authenticate(token) // verify + refresh</span>
+            <span>src/api/control.ts:33       authenticate(req) // gate /_control</span>
+            <span>… +59 more matches across 16 files</span>
+          </div>
+          <div class="evicted-note">⌦ evicted — original in shadow store, restorable</div>
+        </div>
+      </div>
+    </div></div>
+
+    <!-- 3 -->
+    <div class="row asst"><div class="bubble asst">
+      <div class="who">Agent <span class="id">[asst 2]</span></div>
+      <div class="text">Reading the middleware to see where the limiter should sit.</div>
+      <div class="toolblock">
+        <div class="tcall"><span class="pin">call 2.1</span><span class="cmd">read src/middleware/auth.ts</span></div>
+        <div class="tresult target" data-tok="14600">
+          <div class="scalpel"></div>
+          <div class="rhead"><span class="pin">tool result 2.1</span>
+            <span class="sum"><span class="id">[tool result 2.1]</span> 312 lines</span>
+            <span class="weight">14.6k tok</span></div>
+          <div class="dump">
+            <span>01  import { Request, Response, NextFunction } from "express";</span>
+            <span>02  import { verifyJwt, refreshSession } from "../services/session";</span>
+            <span>14  export async function authenticate(req, res, next){</span>
+            <span>15    const token = req.headers.authorization?.slice(7);</span>
+            <span>16    if(!token) return res.status(401).json({error:"no token"});</span>
+            <span>22    const claims = await verifyJwt(token);</span>
+            <span>…    +298 more lines of middleware, guards, and helpers</span>
+          </div>
+          <div class="evicted-note">⌦ evicted — original in shadow store, restorable</div>
+        </div>
+      </div>
+      <div class="text">It's a single <code>authenticate()</code> entry point — clean place to wrap a limiter before the JWT check.</div>
+    </div></div>
+
+    <!-- 4 -->
+    <div class="row asst"><div class="bubble asst">
+      <div class="who">Agent <span class="id">[asst 3]</span></div>
+      <div class="text">Checking what's already in the dependency tree before adding anything.</div>
+      <div class="toolblock">
+        <div class="tcall"><span class="pin">call 3.1</span><span class="cmd">cat package.json</span></div>
+        <div class="tresult target" data-tok="3100">
+          <div class="scalpel"></div>
+          <div class="rhead"><span class="pin">tool result 3.1</span>
+            <span class="sum"><span class="id">[tool result 3.1]</span> deps + scripts</span>
+            <span class="weight">3.1k tok</span></div>
+          <div class="dump">
+            <span>"express": "^4.19.2",  "jsonwebtoken": "^9.0.2",</span>
+            <span>"ioredis": "^5.4.1",   "zod": "^3.23.8",</span>
+            <span>devDependencies: { "vitest": "^3.0.0", "tsx": "^4.0.0" }</span>
+          </div>
+          <div class="evicted-note">⌦ evicted — original in shadow store, restorable</div>
+        </div>
+      </div>
+      <div class="text"><code>ioredis</code> is already here — so I can back the limiter with Redis for multi-instance correctness. Pulling the <code>express-rate-limit</code> docs.</div>
+    </div></div>
+
+    <!-- 5 -->
+    <div class="row asst"><div class="bubble asst">
+      <div class="who">Agent <span class="id">[asst 4]</span></div>
+      <div class="toolblock">
+        <div class="tcall"><span class="pin">call 4.1</span><span class="cmd">web.fetch express-rate-limit + rate-limit-redis</span></div>
+        <div class="tresult target" data-tok="11800">
+          <div class="scalpel"></div>
+          <div class="rhead"><span class="pin">tool result 4.1</span>
+            <span class="sum"><span class="id">[tool result 4.1]</span> 2 doc pages, markdown</span>
+            <span class="weight">11.8k tok</span></div>
+          <div class="dump">
+            <span># express-rate-limit — windowMs, limit, standardHeaders, store…</span>
+            <span>import rateLimit from "express-rate-limit";</span>
+            <span>import RedisStore from "rate-limit-redis";</span>
+            <span>const limiter = rateLimit({ windowMs: 60_000, limit: 5, … })</span>
+            <span>statusCode defaults to 429; message + handler overridable</span>
+            <span>… +180 more lines of API reference and examples</span>
+          </div>
+          <div class="evicted-note">⌦ evicted — original in shadow store, restorable</div>
+        </div>
+      </div>
+      <div class="text">Plan: add an <code>express-rate-limit</code> instance with a <code>rate-limit-redis</code> store — <code>windowMs: 60000</code>, <code>limit: 5</code>, keyed by IP — and call it at the top of <code>authenticate()</code> so it runs before the JWT verification.</div>
+    </div></div>
+
+    <!-- 6 -->
+    <div class="row user"><div class="bubble user">
+      <div class="who">You <span class="id">[user 2]</span></div>
+      <div class="text">Looks right. Ship it and run the tests.</div>
+    </div></div>
+
+    <!-- 7 -->
+    <div class="row asst"><div class="bubble asst">
+      <div class="who">Agent <span class="id">[asst 5]</span></div>
+      <div class="text">Patching the middleware and running the suite.</div>
+      <div class="toolblock">
+        <div class="tcall"><span class="pin">call 5.1</span><span class="cmd">apply_patch src/middleware/auth.ts</span></div>
+        <div class="tresult" style="border-left-color:var(--restore)">
+          <div class="rhead"><span class="pin" style="color:var(--restore)">edit 5.1</span>
+            <span class="sum">+18 −0 · limiter added before verifyJwt</span>
+            <span class="weight">kept</span></div>
+        </div>
+        <div class="tcall"><span class="pin">call 5.2</span><span class="cmd">npm test</span></div>
+        <div class="tresult target" data-tok="9400">
+          <div class="scalpel"></div>
+          <div class="rhead"><span class="pin">tool result 5.2</span>
+            <span class="sum"><span class="id">[tool result 5.2]</span> vitest output</span>
+            <span class="weight">9.4k tok</span></div>
+          <div class="dump">
+            <span>✓ auth.test.ts (12)  ✓ session.test.ts (9)  ✓ login.test.ts (7)</span>
+            <span>✓ ratelimit.test.ts (6) — 6th attempt within 60s → 429 ✓</span>
+            <span>Test Files  9 passed (9)   Tests  48 passed (48)</span>
+            <span>… +220 lines of per-test timing and coverage</span>
+          </div>
+          <div class="evicted-note">⌦ evicted — original in shadow store, restorable</div>
+        </div>
+      </div>
+      <div class="text"><b>All 48 tests pass.</b> Rate limiting is live: 5 requests / 60s / IP, <code>429</code> beyond that, Redis-backed so it holds across instances.</div>
+    </div></div>
+
+    <!-- 8 -->
+    <div class="row user"><div class="bubble user">
+      <div class="who">You <span class="id">[user 3]</span></div>
+      <div class="text">Nice. Context's getting heavy — we're near the limit. Clean up what you don't need.</div>
+    </div></div>
+
+    <!-- evict turn -->
+    <div class="evict-turn" id="evictTurn">
+      <div class="who">Agent <span class="id">[asst 6]</span></div>
+      <div class="text">Right — the task is shipped, so every one of those file reads, the docs, and the test dump are dead weight now. The edit and the conversation stay. Excising the rest:</div>
+      <div class="evict-cmds">
+        <div class="c"><span class="k">$ context-surgeon evict</span> <span class="arg">"tool result 1.1"</span>  <span class="ok">✓ −8.2k</span></div>
+        <div class="c"><span class="k">$ context-surgeon evict</span> <span class="arg">"tool result 2.1"</span>  <span class="ok">✓ −14.6k</span></div>
+        <div class="c"><span class="k">$ context-surgeon evict</span> <span class="arg">"tool result 3.1"</span>  <span class="ok">✓ −3.1k</span></div>
+        <div class="c"><span class="k">$ context-surgeon evict</span> <span class="arg">"tool result 4.1"</span>  <span class="ok">✓ −11.8k</span></div>
+        <div class="c"><span class="k">$ context-surgeon evict</span> <span class="arg">"tool result 5.2"</span>  <span class="ok">✓ −9.4k</span></div>
+      </div>
+      <div class="reclaimed">
+        <span class="big" id="reclaimed">47,100 tokens</span>
+        <span class="lbl">reclaimed · window back to 57% · everything restorable</span>
+      </div>
+    </div>
+
+    <div class="endcap">— end of session — <span class="up">scroll up to restore</span> —</div>
+  </div>
+
+  <div class="hint" id="hint"><span class="arrow">↓</span> scroll to the end — the agent performs <b>surgery</b></div>
+
+<script>
+  const targets=[...document.querySelectorAll('.tresult.target')];
+  const tokb=document.getElementById('tokb'), fill=document.getElementById('fill'),
+        pct=document.getElementById('pct'), grow=document.getElementById('grow'),
+        hint=document.getElementById('hint'), evictTurn=document.getElementById('evictTurn');
+
+  const FULL=120000, LEAN=72900, MAX=128000;
+  let evicted=false;
+
+  function setMeter(n,low){
+    tokb.textContent=(n/1000).toFixed(1)+'k';
+    tokb.className=low?'low':'';
+    const p=Math.round((n/MAX)*100);
+    fill.style.width=((n/MAX)*100)+'%';
+    fill.className='fill'+(low?' low':'');
+    pct.textContent=p+'%';
+  }
+
+  function doEvict(){
+    if(evicted) return; evicted=true;
+    evictTurn.classList.add('fired');
+    targets.forEach((t,i)=>{
+      setTimeout(()=>{
+        t.classList.add('cutting');
+        setTimeout(()=>{ t.classList.remove('cutting'); t.classList.add('evicted'); }, 300);
+      }, i*150);
+    });
+    setMeter(LEAN,true);
+    hint.classList.add('hidden');
+  }
+  function undo(){
+    if(!evicted) return; evicted=false;
+    evictTurn.classList.remove('fired');
+    targets.forEach(t=>t.classList.remove('evicted','cutting'));
+    setMeter(FULL,false);
+    hint.classList.remove('hidden');
+  }
+
+  function onScroll(){
+    const y=window.scrollY, h=document.body.scrollHeight-window.innerHeight;
+    grow.style.width=(h>0?(y/h)*100:0)+'%';
+    if(y>=h-8) doEvict();
+    else if(y<=10) undo();
+  }
+  window.addEventListener('scroll',onScroll,{passive:true});
+  setMeter(FULL,false); onScroll();
+</script>
+</body>
+</html>

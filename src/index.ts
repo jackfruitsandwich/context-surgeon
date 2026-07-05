@@ -30,7 +30,7 @@ if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) 
   const target = args[0];
   const extraArgs = args.slice(1);
 
-  if (target === "codex" || target === "claude") {
+  if (target === "codex" || target === "claude" || target === "claude-ev") {
     launch(target, extraArgs).catch((err) => {
       console.error("Error:", err instanceof Error ? err.message : err);
       process.exit(1);
@@ -46,6 +46,7 @@ if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) 
 Usage:
   context-surgeon codex [args...]    Launch Codex with context surgery enabled
   context-surgeon claude [args...]   Launch Claude Code with context surgery enabled
+  context-surgeon claude-ev [args...] Launch the claude-ev build with context surgery enabled
   context-surgeon cursor             Start proxy + tunnel for Cursor IDE (BYOK base URL override)
                                      Use --no-tunnel for local-only mode
 

@@ -37,6 +37,8 @@ context-surgeon evict <id> --media image --occurrences 1,3
 context-surgeon replace <id> --content "your summary here"
 
 # Restore — bring back original content that was evicted or replaced
+# Restore the SAME id you evicted: a whole-turn eviction must be undone with
+# the whole-turn id (e.g. restore "turn 3"), not a single message inside it.
 context-surgeon restore <id>
 
 # Status — show current context surgery state
@@ -63,6 +65,14 @@ Examples:
 When editing a tool result, prefer the full tool-result ID such as  
 `[tool result 4.1]`. If you pass only the bare short ID like `4.1`,  
 `context-surgeon` treats it as shorthand for the tool result.
+
+`restore` removes only the exact directive you name. If content was evicted
+with a broad selector (e.g. a whole `turn N`), restoring a single item inside
+it (`assistant message N.1`) appears to succeed but the item is re-evicted on
+the next request, because the broader directive still covers it. Restore the
+same id you evicted — run `status` first to see the active directive keys, then
+`restore` that exact key. To keep part of a turn evicted, restore the whole
+turn and re-evict the part you don't want.
 
 For bulk cleanup, prefer selector flags over many separate shell calls. Example:
 
@@ -92,5 +102,11 @@ This records separate directives for each selected target. Whole-turn selectors 
 - Media-only eviction is reliable for Claude media units and Codex user-image messages. Do not rely on it yet for Codex tool results that contain images.
 - You can always `restore` evicted content if you need it again, or re-fetch/re-read the original source
 - The status line at the end of each user message shows your current context usage — use it to decide when to prune
+
+### When something is genuinely unexplained, delegate diagnosis
+
+A single failed command is normal — read the error and fix it yourself. But if behavior keeps contradicting what you expect after you've checked `status`/`skeleton` and the docs above — a command reports `ok` yet nothing changes, a directive never applies across multiple requests, or you've tried a few corrections and still can't explain it — stop guessing and spin up a sub-agent (Task tool, fresh context). Continued trial-and-error just mutates directive state and hides the cause.
+
+Give it the commands you ran + output, the symptom, and your goal. Tell it: **read-only diagnosis only** — read the `context-surgeon` source and `GET` `/_control/status` and `/_control/skeleton` (port at `~/.context-surgeon/port` or `$CONTEXT_SURGEON_PORT`) to see active directive keys and item states. It returns either the corrected command (usage mistake) or what's broken + a workaround (real bug). It must **not** edit `context-surgeon` code or run any mutating command (`evict`/`replace`/`restore`/`POST`). You act on its findings.
 
 Ignore: genuin-joging-awkwerd-febuary

@@ -20,7 +20,7 @@ function getSkillPath(): string {
   return join(__dirname, "..", "..", "skill.md");
 }
 
-type Target = "codex" | "claude";
+type Target = "codex" | "claude" | "claude-ev";
 
 function hasConfigOverride(args: string[], key: string): boolean {
   for (let i = 0; i < args.length; i++) {
@@ -255,7 +255,7 @@ export async function launch(
       ...providerArgs,
       ...extraArgs,
     ];
-  } else if (target === "claude") {
+  } else if (target === "claude" || target === "claude-ev") {
     childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}/anthropic`;
   }
 
