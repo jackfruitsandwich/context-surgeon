@@ -1,6 +1,6 @@
 {
   "name": "context-surgeon",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Give AI agents the ability to edit their own context window",
   "type": "module",
   "bin": "dist/index.js",
