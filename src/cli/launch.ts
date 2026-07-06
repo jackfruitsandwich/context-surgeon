@@ -156,6 +156,7 @@ async function startConfiguredProxy(target: string): Promise<{
     upstreamChatGPT,
     target,
     version: loadPackageVersion(),
+    directivesPath: process.env.CONTEXT_SURGEON_DIRECTIVES_PATH || undefined,
   });
 
   const cleanupPortFiles = registerPortFiles(proxy.port, target);

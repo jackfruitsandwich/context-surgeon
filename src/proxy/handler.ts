@@ -275,19 +275,17 @@ export async function transformRequest(
   const adapter = getAdapter(format);
   const ctx: ContextObject = adapter.parse(json);
 
-  // Fingerprints are computed on the pristine incoming content, before any
-  // injection, so they are stable across requests, resumes, and forks.
+  // Fingerprints and the resolution snapshot are computed on the pristine
+  // incoming content, before any injection, so they are stable across
+  // requests, resumes, and forks (and previews stay readable).
   computeFingerprints(ctx.items);
+  assignIds(ctx.items);
+  const rootFingerprint = config.tracker.record(ctx.items);
+  const snapshot = rootFingerprint ? config.tracker.get(rootFingerprint) : undefined;
 
   if (config.skillMarkdown.trim() && !contextHasSkillSignature(ctx)) {
     prependTextToFirstUserMessage(ctx, config.skillMarkdown.trim());
   }
-
-  // Pipeline:
-  // 1. Assign display IDs and record the conversation for selector resolution
-  assignIds(ctx.items);
-  const rootFingerprint = config.tracker.record(ctx.items);
-  const snapshot = rootFingerprint ? config.tracker.get(rootFingerprint) : undefined;
 
   const textCharStats = computeTextCharStats(ctx);
   const promptTokensForCurrentRequest =

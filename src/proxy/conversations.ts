@@ -51,8 +51,27 @@ function itemPreview(item: ContextItem): string {
     : collapsed;
 }
 
+// After a control command resolves against a conversation, later commands
+// prefer that same conversation (while it stays active) over the size/recency
+// ranking. The agent issuing commands is almost always operating on the same
+// thread it targeted last time, even when a large subagent is interleaving.
+const STICKY_ROOT_MAX_IDLE_MS = 15 * 60 * 1000;
+
 export class ConversationTracker {
   private conversations = new Map<string, ConversationSnapshot>();
+  private lastDirectiveRoot: string | null = null;
+
+  noteDirectiveRoot(root: string): void {
+    this.lastDirectiveRoot = root;
+  }
+
+  stickyRoot(): string | null {
+    if (!this.lastDirectiveRoot) return null;
+    const snapshot = this.conversations.get(this.lastDirectiveRoot);
+    if (!snapshot) return null;
+    if (Date.now() - snapshot.lastSeenAt > STICKY_ROOT_MAX_IDLE_MS) return null;
+    return this.lastDirectiveRoot;
+  }
 
   /** Record the latest sight of a conversation. Returns its root fingerprint. */
   record(items: ContextItem[]): string | null {
@@ -199,7 +218,12 @@ export function resolveSelectors(
   tracker: ConversationTracker,
   selectors: string[]
 ): ResolutionResult | null {
+  const stickyRoot = tracker.stickyRoot();
   const candidates = tracker.all().sort((a, b) => {
+    if (stickyRoot) {
+      if (a.rootFingerprint === stickyRoot && b.rootFingerprint !== stickyRoot) return -1;
+      if (b.rootFingerprint === stickyRoot && a.rootFingerprint !== stickyRoot) return 1;
+    }
     if (b.itemCount !== a.itemCount) return b.itemCount - a.itemCount;
     return b.lastSeenAt - a.lastSeenAt;
   });

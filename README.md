@@ -72,7 +72,7 @@ You run:  context-surgeon codex
 
 The proxy is ephemeral — it lives only as long as your CLI session. No background daemons, no config files, no cleanup.
 
-When the agent calls `context-surgeon evict`, the CLI records the directive. On the next API request, the proxy replaces the evicted content with `[evicted]`. The original content is saved in a shadow store so it can be restored later.
+When the agent calls `context-surgeon evict`, the proxy resolves the target to a fingerprint of its exact content (chained over the conversation prefix, so it can never match anything else) and records the directive in `~/.context-surgeon/directives.json`. On every subsequent request — including after restarts, resumes, and forks — any content matching the fingerprint is replaced with `[evicted]`. Restoring simply deletes the rule; the original content still lives in your CLI's transcript and reappears on the next request.
 
 ### What the agent sees
 
@@ -149,9 +149,9 @@ context-surgeon/
 
 ## Known limitations
 
-- **Subagent ID overlap**: In Claude Code, subagent messages share the ID namespace with the parent. Evicting a parent message may affect a subagent message with the same ID. Working on a fix.
+- **Identical-prefix conversations share directives**: two conversations whose histories are byte-for-byte identical up to some point share fingerprints for that prefix, so a directive on the shared prefix applies to both. This is by design (it is what makes forks and resumes work) and is harmless — the affected content is the same bytes either way.
+- **Multi-conversation control commands are heuristic**: when several conversations flow through one proxy, `evict`/`restore` resolve ordinal ids against the largest/most recent conversation (sticky to the one you last targeted). Every command's reply names the conversation it resolved against — check it when running surgery around heavy subagent activity.
 - **Claude Code `/` commands**: Some slash commands may interact unexpectedly with the proxy. If you hit issues, restart the session.
-- **Session state is ephemeral**: Eviction directives are lost when the session ends
 
 ## How is this different from auto-compaction?
 

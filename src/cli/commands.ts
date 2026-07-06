@@ -161,6 +161,8 @@ function controlUnavailableError(lastError: unknown): Error {
   );
 }
 
+class ControlHttpError extends Error {}
+
 async function requestJson(
   path: string,
   init?: RequestInit
@@ -183,7 +185,7 @@ async function requestJson(
           typeof payload.error === "string"
             ? payload.error
             : `HTTP ${res.status}`;
-        throw new Error(error);
+        throw new ControlHttpError(error);
       }
       return payload;
     } catch (error) {
@@ -197,6 +199,11 @@ async function requestJson(
     }
   }
 
+  // A clean HTTP error from the proxy is a real answer — pass it through
+  // instead of blaming connectivity.
+  if (lastError instanceof ControlHttpError) {
+    throw new Error(lastError.message);
+  }
   throw controlUnavailableError(lastError);
 }
 

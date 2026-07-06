@@ -219,6 +219,7 @@ export async function handleControl(
           occurrences,
         };
 
+    tracker.noteDirectiveRoot(resolution.conversation.rootFingerprint);
     const now = Date.now();
     for (const item of targets) {
       directiveStore.set(item.fingerprint, {
@@ -258,6 +259,7 @@ export async function handleControl(
       return;
     }
 
+    tracker.noteDirectiveRoot(resolution.conversation.rootFingerprint);
     let removed = 0;
     for (const target of resolution.resolved) {
       for (const item of target.items) {
