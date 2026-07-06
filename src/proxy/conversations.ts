@@ -27,7 +27,7 @@ export type ConversationSnapshot = {
   lastApplied: Set<string>;
 };
 
-const MAX_TRACKED_CONVERSATIONS = 8;
+const MAX_TRACKED_CONVERSATIONS = 16;
 const PREVIEW_CHARS = 80;
 
 function itemPreview(item: ContextItem): string {
@@ -144,18 +144,26 @@ export class ConversationTracker {
     );
   }
 
+  // Displace the smallest conversation first (oldest among ties). Harness
+  // utility calls are a stream of 1-item conversations; they must never be
+  // able to churn the session's real (large) conversation out of the tracker.
   private evictOldest(): void {
     while (this.conversations.size > MAX_TRACKED_CONVERSATIONS) {
-      let oldestKey: string | null = null;
-      let oldestTs = Infinity;
+      let victimKey: string | null = null;
+      let victim: ConversationSnapshot | null = null;
       for (const [key, snapshot] of this.conversations) {
-        if (snapshot.lastSeenAt < oldestTs) {
-          oldestTs = snapshot.lastSeenAt;
-          oldestKey = key;
+        if (
+          !victim ||
+          snapshot.itemCount < victim.itemCount ||
+          (snapshot.itemCount === victim.itemCount &&
+            snapshot.lastSeenAt < victim.lastSeenAt)
+        ) {
+          victim = snapshot;
+          victimKey = key;
         }
       }
-      if (!oldestKey) return;
-      this.conversations.delete(oldestKey);
+      if (!victimKey) return;
+      this.conversations.delete(victimKey);
     }
   }
 }
