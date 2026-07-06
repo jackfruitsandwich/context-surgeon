@@ -190,7 +190,9 @@ export async function handleControl(
       });
       return;
     }
-    if (resolution.missing.length > 0) {
+    // All-miss is an error; partial misses (common with turn-range sweeps)
+    // apply what resolved and name what didn't.
+    if (resolution.resolved.length === 0) {
       jsonResponse(res, 404, {
         ok: false,
         error:
@@ -232,12 +234,18 @@ export async function handleControl(
       });
     }
 
+    const missingNote =
+      resolution.missing.length > 0
+        ? ` WARNING: ${resolution.missing.length} selector(s) matched nothing and were skipped: ${resolution.missing.join(", ")}.`
+        : "";
     jsonResponse(res, 200, {
       ok: true,
       message:
         `${isReplace ? "Replaced" : "Evicted"}: ${targets.length} item(s) in conversation ` +
-        `${conversationLabel(resolution.conversation)}. Takes effect on the next API call.`,
+        `${conversationLabel(resolution.conversation)}. Takes effect on the next API call.` +
+        missingNote,
       resolvedCount: targets.length,
+      missing: resolution.missing,
     });
     return;
   }
