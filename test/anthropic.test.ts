@@ -97,6 +97,104 @@ async function transformFixture(
 }
 
 describe("Anthropic Claude support", () => {
+  it("preserves valid mid-conversation system messages as protected structure", async () => {
+    const handler = makeHandler(TEST_SKILL_MARKDOWN);
+    const body = {
+      model: "claude-sonnet-5",
+      max_tokens: 4096,
+      stream: true,
+      messages: [
+        { role: "user", content: "Start the task" },
+        {
+          role: "system",
+          content: [
+            {
+              type: "text",
+              text: "The user changed the active mode.",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = await transformFixture(handler, body);
+    expect(result).not.toBeNull();
+    const output = JSON.parse(result!.body.toString("utf8")) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    expect(output.messages).toHaveLength(2);
+    expect(output.messages[1]).toEqual(body.messages[1]);
+    expect(result?.artifact.compiled.operationResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ surgeryId: "compiler-bootstrap", outcome: "applied" }),
+      ])
+    );
+  });
+
+  it("accepts a mid-conversation system message after an assistant server tool use", async () => {
+    const handler = makeHandler();
+    const body = {
+      model: "claude-opus-4-8",
+      max_tokens: 4096,
+      messages: [
+        { role: "user", content: "Search for the current status" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_1",
+              name: "web_search",
+              input: { query: "status" },
+            },
+          ],
+        },
+        { role: "system", content: "The deadline changed." },
+      ],
+    };
+    const result = await transformFixture(handler, body);
+    expect(result).not.toBeNull();
+    const output = JSON.parse(result!.body.toString("utf8")) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    expect(output.messages[2]).toEqual(body.messages[2]);
+  });
+
+  it.each([
+    {
+      name: "first message",
+      messages: [
+        { role: "system", content: "invalid" },
+        { role: "user", content: "hello" },
+      ],
+    },
+    {
+      name: "after assistant",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+        { role: "system", content: "invalid" },
+      ],
+    },
+    {
+      name: "before user",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "system", content: "invalid" },
+        { role: "user", content: "again" },
+      ],
+    },
+  ])("rejects a mid-conversation system message in the $name position", async ({ messages }) => {
+    const handler = makeHandler();
+    const result = await transformFixture(handler, {
+      model: "claude-sonnet-5",
+      max_tokens: 4096,
+      messages,
+    });
+    expect(result).toBeNull();
+  });
+
   it("assigns shared turn.action tool IDs while keeping assistant tool_use blocks clean", () => {
     const adapter = new AnthropicMessagesAdapter();
     const ctx = adapter.parse(loadAnthropicFixture());

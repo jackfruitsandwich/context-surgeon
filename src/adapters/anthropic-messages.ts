@@ -4,6 +4,7 @@ import type {
   ContextItem,
   ContextObject,
   FormatAdapter,
+  OtherItem,
   ToolCall,
   ToolResult,
   UserMessage,
@@ -16,7 +17,7 @@ type AnthropicRequest = {
 };
 
 type AnthropicMessage = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string | AnthropicContentBlock[];
   [key: string]: unknown;
 };
@@ -199,11 +200,13 @@ function denormalizeMessageContent(
 
 function getMessageItemByIndex(
   items: ContextItem[]
-): Map<number, UserMessage | AssistantMessage> {
-  const map = new Map<number, UserMessage | AssistantMessage>();
+): Map<number, UserMessage | AssistantMessage | OtherItem> {
+  const map = new Map<number, UserMessage | AssistantMessage | OtherItem>();
   for (const item of items) {
     if (
-      (item.kind === "user-message" || item.kind === "assistant-message") &&
+      (item.kind === "user-message" ||
+        item.kind === "assistant-message" ||
+        item.kind === "other") &&
       typeof item.messageIndex === "number"
     ) {
       map.set(item.messageIndex, item);
@@ -218,6 +221,15 @@ export class AnthropicMessagesAdapter implements FormatAdapter {
     const items: ContextItem[] = [];
 
     req.messages.forEach((message, messageIndex) => {
+      if (message.role === "system") {
+        items.push({
+          kind: "other",
+          id: "",
+          raw: message,
+          messageIndex,
+        });
+        return;
+      }
       const blocks = normalizeMessageContent(message.content);
       const content: ContentBlock[] = [];
       const blockIndices: number[] = [];
@@ -296,6 +308,9 @@ export class AnthropicMessagesAdapter implements FormatAdapter {
     const messages = [...messageItems.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, messageItem]) => {
+        if (messageItem.kind === "other") {
+          return structuredClone(messageItem.raw as AnthropicMessage);
+        }
         const rawMessage = structuredClone(
           messageItem.raw as AnthropicMessage
         );

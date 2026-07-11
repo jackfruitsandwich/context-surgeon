@@ -13,6 +13,15 @@ import {
 } from "./shared.js";
 
 const THINKING_TYPES = new Set(["thinking", "redacted_thinking"]);
+
+function assistantEndsInServerToolUse(value: unknown): boolean {
+  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) {
+    return false;
+  }
+  const finalBlock = value.content[value.content.length - 1];
+  return isRecord(finalBlock) && finalBlock.type === "server_tool_use";
+}
+
 function messages(value: Readonly<JsonRecord>): unknown[] {
   if (!Array.isArray(value.messages)) {
     throw new Error("Anthropic Messages request.messages must be an array");
@@ -60,8 +69,10 @@ function inspectAnthropic(value: Readonly<JsonRecord>, errors: string[]) {
       return;
     }
     const role = rawMessage.role;
-    if (role !== "user" && role !== "assistant") {
-      errors.push(`messages[${messageIndex}].role must be user or assistant`);
+    if (role !== "user" && role !== "assistant" && role !== "system") {
+      errors.push(
+        `messages[${messageIndex}].role must be user, assistant, or system; observed ${JSON.stringify(role)}`
+      );
     }
     pushProtectedHash(
       protectedHashes,
@@ -69,6 +80,46 @@ function inspectAnthropic(value: Readonly<JsonRecord>, errors: string[]) {
       { ...rawMessage, content: undefined },
       ":envelope"
     );
+
+    if (role === "system") {
+      const previous = messageList[messageIndex - 1];
+      const next = messageList[messageIndex + 1];
+      if (
+        messageIndex === 0 ||
+        (!isRecord(previous) ||
+          (previous.role !== "user" && !assistantEndsInServerToolUse(previous)))
+      ) {
+        errors.push(
+          `messages[${messageIndex}] system role must immediately follow a user turn or assistant server tool use`
+        );
+      }
+      if (next !== undefined && (!isRecord(next) || next.role !== "assistant")) {
+        errors.push(
+          `messages[${messageIndex}] system role must be last or immediately precede an assistant turn`
+        );
+      }
+      if (
+        typeof rawMessage.content !== "string" &&
+        !Array.isArray(rawMessage.content)
+      ) {
+        errors.push(
+          `messages[${messageIndex}].content must be a string or array for system role`
+        );
+      } else if (
+        (typeof rawMessage.content === "string" && rawMessage.content.length === 0) ||
+        (Array.isArray(rawMessage.content) && rawMessage.content.length === 0)
+      ) {
+        errors.push(`messages[${messageIndex}].content must not be empty`);
+      }
+      pushProtectedHash(
+        protectedHashes,
+        ["messages", messageIndex],
+        rawMessage,
+        ":mid-conversation-system"
+      );
+      orderEntries.push({ role: "system", protected: true });
+      return;
+    }
 
     const content = rawMessage.content;
     if (typeof content === "string") {
@@ -248,6 +299,17 @@ export class AnthropicMessagesCodec extends BaseProviderCodec {
       const role = rawMessage.role;
       const message = messageItem(context, messageIndex);
       const label = message?.id || `message ${messageIndex + 1}`;
+      if (role === "system") {
+        add({
+          kind: "other",
+          value: rawMessage,
+          displayLabel: label,
+          providerPath: ["messages", messageIndex],
+          mutable: false,
+          protectedReason: "Anthropic mid-conversation system instructions are protected",
+        });
+        return;
+      }
       if (typeof rawMessage.content === "string") {
         add({
           kind: role === "assistant" ? "assistant-text" : "user-text",
