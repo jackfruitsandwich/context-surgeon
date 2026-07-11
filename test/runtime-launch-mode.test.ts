@@ -4,6 +4,7 @@ import {
   parseConfigOverrides,
   parseTopLevelCodexConfig,
 } from "../src/runtime/launch-mode.js";
+import { withSafeClaudeDefaults } from "../src/cli/launch.js";
 
 function classify(input: {
   args?: string[];
@@ -19,6 +20,21 @@ function classify(input: {
     proxyBase: "http://127.0.0.1:4321",
   });
 }
+
+describe("Claude launch safety defaults", () => {
+  it("disables background prompt-suggestion requests unless explicitly configured", () => {
+    expect(withSafeClaudeDefaults(["--model", "haiku"])).toEqual([
+      "--prompt-suggestions",
+      "false",
+      "--model",
+      "haiku",
+    ]);
+    expect(withSafeClaudeDefaults(["--prompt-suggestions", "true", "--model", "haiku"]))
+      .toEqual(["--prompt-suggestions", "true", "--model", "haiku"]);
+    expect(withSafeClaudeDefaults(["--prompt-suggestions=false"]))
+      .toEqual(["--prompt-suggestions=false"]);
+  });
+});
 
 describe("Codex positive launch classification", () => {
   it("configures subscription auth without unconditional built-in base URL overrides", () => {

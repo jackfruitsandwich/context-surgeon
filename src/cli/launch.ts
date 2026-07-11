@@ -22,6 +22,17 @@ import { startCloudflaredTunnel } from "../runtime/tunnel.js";
 
 type Target = "codex" | "claude" | "claude-ev";
 
+export function withSafeClaudeDefaults(args: readonly string[]): string[] {
+  const explicitlyConfigured = args.some(
+    (argument) =>
+      argument === "--prompt-suggestions" ||
+      argument.startsWith("--prompt-suggestions=")
+  );
+  return explicitlyConfigured
+    ? [...args]
+    : ["--prompt-suggestions", "false", ...args];
+}
+
 export type RuntimeIntegrations = Readonly<{
   sessionId?: string;
   sessionDirectory?: string;
@@ -191,6 +202,7 @@ export async function launch(
     upstreamClass = "anthropic-api";
     authClass = "native Claude credential forwarding";
     trafficPolicy = policyForMode("claude");
+    childArgs = withSafeClaudeDefaults(extraArgs);
   }
 
   const proxy = await startConfiguredProxy({
