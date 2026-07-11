@@ -51,5 +51,9 @@ export type TruthStatus = Readonly<{
     value: number | null;
     provenance: UsageProvenance;
   }>;
+  ledger: Readonly<{
+    path: string;
+    persisted: boolean;
+    error?: string;
+  }>;
 }>;
-

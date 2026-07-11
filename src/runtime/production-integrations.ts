@@ -19,6 +19,7 @@ import {
 import { startControlSocket, type ControlSocketServer } from "../api/control-socket.js";
 import { StateControlService } from "../api/state-control.js";
 import type { ControlIdentity } from "../contracts/control.js";
+import type { AttemptReceipt } from "../contracts/truth.js";
 import type { IdentityResolver, ResolvedIdentity } from "../contracts/state.js";
 import { ExplicitConversationCatalog } from "../proxy/conversations.js";
 import type { HandlerConfig } from "../proxy/handler.js";
@@ -39,6 +40,7 @@ import type {
   ControlPlaneBootstrap,
   ControlPlaneHandle,
 } from "./control-listener.js";
+import { AttemptLedger } from "./attempt-ledger.js";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 750;
 
@@ -266,6 +268,8 @@ export function createProductionRuntimeIntegrations(
   let v2Session: ProductionV2Session | null = null;
   let recordWritten = false;
   let recordWriteAttempted = false;
+  let attemptLedger: AttemptLedger | null = null;
+  let attemptLedgerError: string | null = null;
   let socketRemovalAuthorized = false;
   let bootstrapping = false;
   let bootstrapped = false;
@@ -348,6 +352,7 @@ export function createProductionRuntimeIntegrations(
         store: ownedState.store,
         catalog,
       });
+      attemptLedger = new AttemptLedger(sessionDirectory);
       const identity: ControlIdentity = Object.freeze({
         pid: process.pid,
         version: options.version,
@@ -357,7 +362,51 @@ export function createProductionRuntimeIntegrations(
         startedAt: owner.acquiredAt,
         get guarantee() { return input.guarantee.current(); },
       });
-      const service = new StateControlService(sessionId, ownedState.store, catalog);
+      const service = new StateControlService(
+        sessionId,
+        ownedState.store,
+        catalog,
+        undefined,
+        () => {
+          const observation = attemptLedger?.latest() ?? null;
+          const receipt = observation?.receipt ?? null;
+          const usage = receipt?.usage;
+          const inputTokens = usage
+            ? usage.input_tokens ??
+              usage.prompt_tokens ??
+              ((usage.uncached_input_tokens ?? 0) +
+                (usage.cache_creation_input_tokens ?? 0) +
+                (usage.cache_read_input_tokens ?? 0))
+            : null;
+          const persisted = attemptLedger?.inspection().exists === true && !attemptLedgerError;
+          return Object.freeze({
+            guarantee: input.guarantee.current(),
+            lastAttempt: receipt,
+            usage: Object.freeze({
+              value: typeof inputTokens === "number" ? inputTokens : null,
+              provenance:
+                receipt && usage && observation
+                  ? Object.freeze({
+                      kind: "provider-reported" as const,
+                      attemptId: receipt.attemptId,
+                      observedAt: observation.observedAt,
+                      requestsAgo: 0,
+                    })
+                  : Object.freeze({
+                      kind: "unknown" as const,
+                      reason: receipt
+                        ? "Provider did not report usage for the latest attempt"
+                        : "No compiled attempt has been observed",
+                    }),
+            }),
+            ledger: Object.freeze({
+              path: attemptLedger?.path ?? join(sessionDirectory, "attempts.jsonl"),
+              persisted,
+              ...(attemptLedgerError ? { error: attemptLedgerError } : {}),
+            }),
+          });
+        }
+      );
       controlSocket = await startControlSocket(socketPath, {
         v2: true,
         capability,
@@ -399,6 +448,19 @@ export function createProductionRuntimeIntegrations(
     const productionConfig: ProductionHandlerConfig = {
       ...config,
       v2Session,
+      onAttemptReceipt: (receipt: AttemptReceipt) => {
+        try {
+          attemptLedger?.record(receipt);
+          attemptLedgerError = null;
+        } catch (error) {
+          attemptLedgerError = error instanceof Error ? error.message : String(error);
+          // Before handoff, missing durable evidence is a local fail-closed
+          // condition. After handoff, surfacing the error in authenticated
+          // status is the only honest action; the request cannot be unsent.
+          if (receipt.state === "compiled") throw error;
+        }
+        config.onAttemptReceipt?.(receipt);
+      },
     };
     return await handleSupportedRoute(req, res, productionConfig, debug);
   };

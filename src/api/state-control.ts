@@ -7,6 +7,7 @@ import type {
   StateTransactionStore,
   SurgeryAction,
   SurgeryRecord,
+  TruthStatus,
 } from "../contracts/index.js";
 import type { OperationResult } from "../contracts/truth.js";
 import {
@@ -41,6 +42,7 @@ export type StateControlStatus = Readonly<{
   revision: number;
   surgeries: readonly SurgeryRecord[];
   receipts: number;
+  truth?: TruthStatus;
 }>;
 
 class UnsupportedTargetError extends Error {
@@ -97,7 +99,8 @@ export class StateControlService {
     readonly sessionId: string,
     private readonly store: StateTransactionStore,
     private readonly catalog: ExplicitConversationCatalog,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly truthStatus?: () => TruthStatus
   ) {}
 
   selections(): readonly BranchSelection[] {
@@ -141,6 +144,7 @@ export class StateControlService {
       revision: state.revision,
       surgeries: Object.freeze(state.surgeries.filter((surgery) => surgery.branchId === selection.branchId)),
       receipts: Object.keys(state.receiptsByOperationId).length,
+      ...(this.truthStatus ? { truth: this.truthStatus() } : {}),
     });
   }
 
