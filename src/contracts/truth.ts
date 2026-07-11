@@ -23,6 +23,7 @@ export type ReceivedRequest = Readonly<{
 }>;
 
 export type OperationOutcome =
+  | "committed"
   | "applied"
   | "protected-residue"
   | "unsupported"
@@ -233,4 +234,3 @@ export function createDispatchArtifact(input: {
     ),
   });
 }
-

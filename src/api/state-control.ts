@@ -241,7 +241,7 @@ export class StateControlService {
         surgeryId,
         occurrenceId: target.occurrenceId,
         expectedSourceHash: target.sourceHash,
-        outcome: "applied" as const,
+        outcome: "committed" as const,
         reason: "intended-surgery-committed",
       }));
     }
