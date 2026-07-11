@@ -33,6 +33,7 @@ Silence stays unverified. An observed route or authentication class that does no
 | Codex `--profile` | Rejected because the profile can change provider/auth routing |
 | Codex custom `model_provider` or base URL | Rejected; B3 never overwrites a custom backend |
 | Codex `--oss` | Rejected; the local backend is not redirected |
+| Codex remote, app, cloud, or server modes | Rejected because they do not preserve one wrapped child session and one observable model-request path |
 | Claude Code, native Anthropic configuration | Supported |
 | Claude Code with an existing `ANTHROPIC_BASE_URL` | Rejected; B3 never overwrites a custom backend |
 | Cursor | Experimental and unsupported for the v2 truth guarantee until B3b; requires explicit `--experimental` |

@@ -57,6 +57,10 @@ describe("Codex positive launch classification", () => {
     const provider = ["-c", 'model_provider="context_surgeon_chatgpt"'];
     expect(injectCodexProviderArgs(["exec", "-m", "gpt-5.4-mini", "work"], provider))
       .toEqual(["exec", "-m", "gpt-5.4-mini", "work", ...provider]);
+    expect(injectCodexProviderArgs(["e", "-m", "gpt-5.4-mini", "work"], provider))
+      .toEqual(["e", "-m", "gpt-5.4-mini", "work", ...provider]);
+    expect(injectCodexProviderArgs(["--disable", "fast_mode", "exec", "work"], provider))
+      .toEqual(["--disable", "fast_mode", "exec", "work", ...provider]);
     expect(injectCodexProviderArgs(["-a", "never", "exec", "review", "--uncommitted"], provider))
       .toEqual(["-a", "never", "exec", "review", "--uncommitted", ...provider]);
     expect(injectCodexProviderArgs(["resume", "--last"], provider))
@@ -113,6 +117,17 @@ describe("Codex positive launch classification", () => {
     expect(plan.providerArgs.join(" ")).toContain('env_key="CODEX_API_KEY"');
     expect(plan.providerArgs.join(" ")).not.toContain("one-run-secret");
 
+    const aliasPlan = classify({
+      args: ["e", "do work"],
+      env: { CODEX_API_KEY: "alias-secret" },
+      authMode: "unknown",
+    });
+    expect(aliasPlan).toMatchObject({ supported: true, mode: "api-key" });
+    if (aliasPlan.supported) {
+      expect(aliasPlan.providerArgs.join(" ")).toContain('env_key="CODEX_API_KEY"');
+      expect(aliasPlan.providerArgs.join(" ")).not.toContain("alias-secret");
+    }
+
     expect(
       classify({ env: { CODEX_API_KEY: "ignored-interactively" }, authMode: "unknown" })
     ).toMatchObject({ supported: false, mode: "auth-unknown" });
@@ -130,6 +145,12 @@ describe("Codex positive launch classification", () => {
     { name: "remote mode", input: { args: ["resume", "--remote", "ws://127.0.0.1:9000"] }, mode: "remote" },
     { name: "remote auth mode", input: { args: ["fork", "--remote-auth-token-env=TOKEN"] }, mode: "remote" },
     { name: "local provider", input: { args: ["--local-provider", "ollama"] }, mode: "oss" },
+    { name: "app server", input: { args: ["app-server"] }, mode: "server" },
+    { name: "MCP server", input: { args: ["mcp-server"] }, mode: "server" },
+    { name: "exec server", input: { args: ["exec-server"] }, mode: "server" },
+    { name: "remote control", input: { args: ["remote-control"] }, mode: "server" },
+    { name: "detached app", input: { args: ["app"] }, mode: "server" },
+    { name: "cloud task", input: { args: ["cloud"] }, mode: "server" },
     { name: "custom provider file", input: { config: { model_provider: "ollama" } }, mode: "custom-provider" },
     { name: "custom URL env", input: { env: { OPENAI_BASE_URL: "https://gateway.test/v1" } }, mode: "custom-base-url" },
     { name: "custom URL config", input: { config: { openai_base_url: "https://gateway.test/v1" } }, mode: "custom-base-url" },

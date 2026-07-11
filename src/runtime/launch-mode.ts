@@ -19,7 +19,7 @@ export type CodexLaunchPlan =
     }>
   | Readonly<{
       supported: false;
-      mode: "profile" | "custom-provider" | "custom-base-url" | "remote" | "oss" | "auth-unknown";
+      mode: "profile" | "custom-provider" | "custom-base-url" | "remote" | "server" | "oss" | "auth-unknown";
       reason: string;
     }>;
 
@@ -27,6 +27,7 @@ type ConfigOverrides = Readonly<Record<string, string>>;
 
 const CODEX_TOP_LEVEL_COMMANDS = new Set([
   "exec",
+  "e",
   "review",
   "login",
   "logout",
@@ -55,6 +56,8 @@ const CODEX_TOP_LEVEL_COMMANDS = new Set([
 const CODEX_OPTIONS_WITH_VALUES = new Set([
   "-c",
   "--config",
+  "--enable",
+  "--disable",
   "--remote",
   "--remote-auth-token-env",
   "-i",
@@ -217,6 +220,22 @@ export function classifyCodexLaunch(input: {
 }): CodexLaunchPlan {
   const overrides = parseConfigOverrides(input.args);
   const userConfig: ConfigOverrides = input.userConfig ?? Object.freeze({});
+  const topLevelIndex = commandIndex(input.args, 0, CODEX_TOP_LEVEL_COMMANDS);
+  const topLevelCommand = topLevelIndex === null ? null : input.args[topLevelIndex];
+  if (
+    topLevelCommand === "mcp-server" ||
+    topLevelCommand === "app-server" ||
+    topLevelCommand === "exec-server" ||
+    topLevelCommand === "remote-control" ||
+    topLevelCommand === "app" ||
+    topLevelCommand === "cloud"
+  ) {
+    return {
+      supported: false,
+      mode: "server",
+      reason: `Codex '${topLevelCommand}' does not preserve the one-wrapper, one-model-session guarantee`,
+    };
+  }
   if (input.args.includes("--oss")) {
     return { supported: false, mode: "oss", reason: "Codex OSS mode uses a local backend and is not redirected" };
   }
@@ -287,7 +306,7 @@ export function classifyCodexLaunch(input: {
   const forcedLogin = overrides.forced_login_method || userConfig.forced_login_method;
   const apiKeyEnvironment = input.env.OPENAI_API_KEY
     ? "OPENAI_API_KEY"
-    : input.env.CODEX_API_KEY && input.args.includes("exec")
+    : input.env.CODEX_API_KEY && (topLevelCommand === "exec" || topLevelCommand === "e")
       ? "CODEX_API_KEY"
       : null;
   let mode = input.authMode;
