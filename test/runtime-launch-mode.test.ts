@@ -4,7 +4,10 @@ import {
   parseConfigOverrides,
   parseTopLevelCodexConfig,
 } from "../src/runtime/launch-mode.js";
-import { withSafeClaudeDefaults } from "../src/cli/launch.js";
+import {
+  applySafeClaudeEnvironment,
+  withSafeClaudeDefaults,
+} from "../src/cli/launch.js";
 
 function classify(input: {
   args?: string[];
@@ -33,6 +36,18 @@ describe("Claude launch safety defaults", () => {
       .toEqual(["--prompt-suggestions", "true", "--model", "haiku"]);
     expect(withSafeClaudeDefaults(["--prompt-suggestions=false"]))
       .toEqual(["--prompt-suggestions=false"]);
+  });
+
+  it("disables nonessential Claude network traffic while preserving an explicit override", () => {
+    const defaults: NodeJS.ProcessEnv = {};
+    applySafeClaudeEnvironment(defaults);
+    expect(defaults.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
+
+    const explicit: NodeJS.ProcessEnv = {
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "0",
+    };
+    applySafeClaudeEnvironment(explicit);
+    expect(explicit.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("0");
   });
 });
 

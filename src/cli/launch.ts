@@ -33,6 +33,10 @@ export function withSafeClaudeDefaults(args: readonly string[]): string[] {
     : ["--prompt-suggestions", "false", ...args];
 }
 
+export function applySafeClaudeEnvironment(env: NodeJS.ProcessEnv): void {
+  env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= "1";
+}
+
 export type RuntimeIntegrations = Readonly<{
   sessionId?: string;
   sessionDirectory?: string;
@@ -235,6 +239,7 @@ export async function launch(
     }
     childArgs = [...plan.providerArgs, ...extraArgs];
   } else {
+    applySafeClaudeEnvironment(childEnv);
     childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.modelPort}/anthropic`;
   }
 

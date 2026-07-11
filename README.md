@@ -39,7 +39,7 @@ Silence stays unverified. An observed route or authentication class that does no
 
 Codex configuration uses a dedicated `model_providers.context_surgeon_*` entry passed on the command line. Context Surgeon does not set unconditional `chatgpt_base_url` or `openai_base_url` overrides. Cursor's tunnel targets only the loopback model port. `/_control` on that port returns a local 404 and is never forwarded.
 
-Claude prompt suggestions are disabled by default because Claude Code otherwise sends a second full-context background request after a response. That request costs context and creates a competing history before the next user turn. An explicit `--prompt-suggestions true` is preserved, but surgery will reject rather than guess if the resulting histories become ambiguous.
+Claude nonessential network traffic and prompt suggestions are disabled by default because Claude Code otherwise sends a second full-context background request after a response. That request costs context and creates a competing history before the next user turn. Existing `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` values and explicit `--prompt-suggestions` flags are preserved; surgery will reject rather than guess if an override produces ambiguous histories.
 
 ## What is persisted
 
