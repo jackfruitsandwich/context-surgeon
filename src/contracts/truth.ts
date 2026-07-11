@@ -124,6 +124,8 @@ export type AttemptReceipt = Readonly<{
   state: AttemptState;
   method: "POST";
   fullUrl: string;
+  /** Present only when a persisted observation removed query values. */
+  urlValuesRedacted?: boolean;
   exactScopeSha256: string;
   bodySha256: string;
   bodyLength: number;

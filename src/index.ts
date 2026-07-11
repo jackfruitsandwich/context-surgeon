@@ -16,6 +16,8 @@ const commandModeCommands = new Set([
   "restore",
   "status",
   "skeleton",
+  "selections",
+  "doctor",
 ]);
 
 function printGuide(): void {
@@ -70,7 +72,9 @@ When running inside a session:
   context-surgeon replace <occurrence-id> --content "..."
                                                 Commit reviewed replacement text
   context-surgeon restore <occurrence-id>       Commit a reversal
-  context-surgeon status                        Show intent, reconciliation, attempt, and usage truth`);
+  context-surgeon status                        Show intent, reconciliation, attempt, and usage truth
+  context-surgeon selections                    List explicitly observed branches
+  context-surgeon doctor                        Inspect recovery and legacy migration evidence`);
     process.exit(target ? 1 : 0);
   }
 }

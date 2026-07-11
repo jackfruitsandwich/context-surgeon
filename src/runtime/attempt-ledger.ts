@@ -58,6 +58,13 @@ function loadLatest(path: string): AttemptLedgerObservation | null {
   return latest;
 }
 
+function persistenceSafeReceipt(receipt: AttemptReceipt): AttemptReceipt {
+  const url = new URL(receipt.fullUrl);
+  if (!url.search && !url.hash) return receipt;
+  const fullUrl = `${url.origin}${url.pathname}${url.search ? "?<redacted>" : ""}`;
+  return Object.freeze({ ...receipt, fullUrl, urlValuesRedacted: true });
+}
+
 /**
  * Append-only, non-authoritative attempt evidence. It contains hashes,
  * lengths, lifecycle, safe header classifications, operation outcomes, and
@@ -78,7 +85,11 @@ export class AttemptLedger {
 
   record(receipt: AttemptReceipt, observedAt = new Date().toISOString()): AttemptLedgerObservation {
     const observation = Object.freeze({ observedAt, receipt });
-    const payload = `${JSON.stringify(observation)}\n`;
+    const persisted = Object.freeze({
+      observedAt,
+      receipt: persistenceSafeReceipt(receipt),
+    });
+    const payload = `${JSON.stringify(persisted)}\n`;
     const fd = openSync(
       this.path,
       constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY,

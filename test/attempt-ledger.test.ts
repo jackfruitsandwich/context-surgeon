@@ -82,4 +82,25 @@ describe("attempt ledger", () => {
     expect(reopened.latest()?.receipt.state).toBe("response-completed");
     expect(reopened.latest()?.observedAt).toBe("2026-07-11T13:00:01.000Z");
   });
+
+  it("never persists URL query values while retaining the exact-scope hash", () => {
+    const directory = temp();
+    const ledger = new AttemptLedger(directory);
+    const value = {
+      ...receipt("response-completed"),
+      fullUrl: "https://api.anthropic.com/v1/messages?api_key=do-not-persist",
+    };
+    ledger.record(value);
+
+    const serialized = readFileSync(ledger.path, "utf8");
+    expect(serialized).not.toContain("do-not-persist");
+    expect(serialized).toContain("?<redacted>");
+    expect(ledger.latest()?.receipt.fullUrl).toBe(value.fullUrl);
+    const reopened = new AttemptLedger(directory);
+    expect(reopened.latest()?.receipt).toMatchObject({
+      fullUrl: "https://api.anthropic.com/v1/messages?<redacted>",
+      urlValuesRedacted: true,
+      exactScopeSha256: value.exactScopeSha256,
+    });
+  });
 });

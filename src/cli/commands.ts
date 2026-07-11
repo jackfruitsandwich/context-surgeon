@@ -728,6 +728,11 @@ export async function runCommand(args: string[]): Promise<void> {
       break;
     }
 
+    case "selections": {
+      console.log(JSON.stringify(await get("/_control/selections"), null, 2));
+      break;
+    }
+
     case "doctor": {
       console.log(JSON.stringify(await get("/_control/doctor"), null, 2));
       break;
@@ -735,7 +740,7 @@ export async function runCommand(args: string[]): Promise<void> {
 
     default:
       console.error(
-        `Unknown command: ${command}\n\nAvailable commands:\n  evict <id> [--media image|document] [--occurrences 1,3]\n  evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2\n  replace <id> --content "summary"\n  restore <id>\n  status\n  skeleton [--json]\n  doctor`
+        `Unknown command: ${command}\n\nAvailable commands:\n  evict <id> [--media image|document] [--occurrences 1,3]\n  evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2\n  replace <id> --content "summary"\n  restore <id>\n  status\n  skeleton [--json]\n  selections\n  doctor`
       );
       process.exit(1);
   }

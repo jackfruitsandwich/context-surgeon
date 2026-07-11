@@ -20,5 +20,6 @@ describe("package metadata", () => {
     expect(skill).toContain("context-surgeon guide");
     expect(packageJson.files).toContain("guide.md");
     expect(packageJson.scripts["test:package"]).toContain("test-packed-install.mjs");
+    expect(packageJson.scripts.prepack).toBe("npm run build");
   });
 });
