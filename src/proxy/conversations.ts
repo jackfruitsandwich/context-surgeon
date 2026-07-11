@@ -1,5 +1,6 @@
 import type { ContextItem } from "../context/types.js";
 import { measureItemTextChars } from "../context/status.js";
+import type { Occurrence, ResolvedIdentity } from "../contracts/state.js";
 
 // Snapshots exist ONLY so control commands can resolve ordinal labels
 // ("tool result 12.3") to content fingerprints, and so the status line can
@@ -259,4 +260,93 @@ export function resolveSelectors(
     }
   }
   return best;
+}
+
+// ---- v2 explicit branch catalog ----
+
+export type BranchSelection = Readonly<{
+  sessionId: string;
+  conversationId: string;
+  branchId: string;
+}>;
+
+export type ExplicitBranchSnapshot = Readonly<{
+  identity: ResolvedIdentity;
+  pristineItemHashes: readonly string[];
+  occurrences: readonly Occurrence[];
+  observedAt: string;
+}>;
+
+export class AmbiguousConversationError extends Error {
+  readonly code = "ambiguous-identity" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "AmbiguousConversationError";
+  }
+}
+
+function selectionKey(selection: BranchSelection): string {
+  return `${selection.sessionId}\0${selection.conversationId}\0${selection.branchId}`;
+}
+
+function assertOccurrenceSet(snapshot: ExplicitBranchSnapshot): void {
+  const ids = new Set<string>();
+  for (const occurrence of snapshot.occurrences) {
+    if (
+      occurrence.sessionId !== snapshot.identity.sessionId ||
+      occurrence.branchId !== snapshot.identity.branchId
+    ) {
+      throw new Error("Occurrence identity does not belong to its branch snapshot");
+    }
+    if (ids.has(occurrence.occurrenceId)) {
+      throw new AmbiguousConversationError(
+        `Duplicate occurrence identity ${occurrence.occurrenceId}`
+      );
+    }
+    ids.add(occurrence.occurrenceId);
+  }
+}
+
+/**
+ * An exact catalog for control and compilation. There is deliberately no
+ * primary(), sticky selection, size ranking, or recency fallback in this API.
+ */
+export class ExplicitConversationCatalog {
+  private readonly branches = new Map<string, ExplicitBranchSnapshot>();
+
+  publish(snapshot: ExplicitBranchSnapshot): void {
+    if (snapshot.identity.confidence === "ambiguous") {
+      throw new AmbiguousConversationError(
+        snapshot.identity.reason ?? "Cannot publish an ambiguous branch"
+      );
+    }
+    assertOccurrenceSet(snapshot);
+    this.branches.set(selectionKey(snapshot.identity), Object.freeze({
+      ...snapshot,
+      pristineItemHashes: Object.freeze([...snapshot.pristineItemHashes]),
+      occurrences: Object.freeze([...snapshot.occurrences]),
+    }));
+  }
+
+  exact(selection: BranchSelection): ExplicitBranchSnapshot {
+    const snapshot = this.branches.get(selectionKey(selection));
+    if (!snapshot) {
+      throw new AmbiguousConversationError(
+        "The exact session/conversation/branch selection is not currently observed"
+      );
+    }
+    if (snapshot.identity.confidence === "ambiguous") {
+      throw new AmbiguousConversationError(
+        snapshot.identity.reason ?? "Selected branch identity is ambiguous"
+      );
+    }
+    return snapshot;
+  }
+
+  list(sessionId?: string): readonly ExplicitBranchSnapshot[] {
+    return [...this.branches.values()].filter(
+      (snapshot) => !sessionId || snapshot.identity.sessionId === sessionId
+    );
+  }
 }

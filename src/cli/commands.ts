@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { requestJson } from "./control-client.js";
-import { getPort } from "./session-discovery.js";
+import type { BranchSelection } from "../proxy/conversations.js";
 export { isRetryableControlError } from "./control-client.js";
 
 type StatusDirectiveRow = {
@@ -510,15 +511,99 @@ export function formatSkeletonOutput(result: SkeletonResponse): string {
   return lines.join("\n");
 }
 
-export async function runCommand(args: string[]): Promise<void> {
-  const port = getPort();
-  if (!port) {
-    console.error(
-      "Error: No running context-surgeon session found.\n" +
-        "Start one with: context-surgeon codex or context-surgeon claude"
+type V2SkeletonOccurrence = {
+  occurrenceId: string;
+  alias: string;
+  kind: string;
+  sourceHash: string;
+  mutable: boolean;
+  protectedReason?: string;
+  activeSurgeryIds: string[];
+};
+
+type V2SkeletonResponse = {
+  selection: BranchSelection;
+  revision: number;
+  confidence: string;
+  occurrences: V2SkeletonOccurrence[];
+};
+
+function selectionQuery(selection: BranchSelection): string {
+  const query = new URLSearchParams(selection);
+  return query.toString();
+}
+
+async function exactSelection(): Promise<BranchSelection> {
+  const sessionId = process.env.CONTEXT_SURGEON_SESSION_ID;
+  const conversationId = process.env.CONTEXT_SURGEON_CONVERSATION_ID;
+  const branchId = process.env.CONTEXT_SURGEON_BRANCH_ID;
+  if (sessionId && conversationId && branchId) return { sessionId, conversationId, branchId };
+  const response = await get("/_control/selections") as { selections?: BranchSelection[] };
+  const selections = response.selections ?? [];
+  if (selections.length !== 1) {
+    throw new Error(
+      selections.length === 0
+        ? "No unambiguous conversation branch has been observed"
+        : "Multiple conversation branches are observed; set CONTEXT_SURGEON_SESSION_ID, CONTEXT_SURGEON_CONVERSATION_ID, and CONTEXT_SURGEON_BRANCH_ID"
     );
-    process.exit(1);
   }
+  return selections[0];
+}
+
+async function currentSkeleton(): Promise<V2SkeletonResponse> {
+  const selection = await exactSelection();
+  return get(`/_control/skeleton?${selectionQuery(selection)}`) as Promise<V2SkeletonResponse>;
+}
+
+function exactOccurrenceIds(
+  skeleton: V2SkeletonResponse,
+  selectors: readonly string[]
+): string[] {
+  const ids: string[] = [];
+  for (const selector of selectors) {
+    const direct = skeleton.occurrences.filter((item) => item.occurrenceId === selector);
+    if (direct.length === 1) {
+      ids.push(direct[0].occurrenceId);
+      continue;
+    }
+    let matches: V2SkeletonOccurrence[];
+    const turn = /^turn (\d+)$/.exec(selector);
+    const kindTurn = /^(assistant message|tool call|tool result) (\d+)$/.exec(selector);
+    if (turn) {
+      matches = skeleton.occurrences.filter((item) =>
+        new RegExp(`^(?:user message|assistant message|tool call|tool result) ${turn[1]}(?:\\.|$)`).test(item.alias)
+      );
+    } else if (kindTurn) {
+      matches = skeleton.occurrences.filter((item) =>
+        new RegExp(`^${kindTurn[1]} ${kindTurn[2]}(?:\\.|$)`).test(item.alias)
+      );
+    } else {
+      matches = skeleton.occurrences.filter((item) => item.alias === selector);
+      if (matches.length > 1) throw new Error(`Alias ${selector} is ambiguous; use an occurrenceId`);
+    }
+    if (matches.length === 0) throw new Error(`No occurrence matches ${selector}`);
+    ids.push(...matches.map((item) => item.occurrenceId));
+  }
+  return uniquePreservingOrder(ids);
+}
+
+async function mutateV2(
+  skeleton: V2SkeletonResponse,
+  occurrenceIds: readonly string[],
+  action: Record<string, unknown>,
+  requireComplete: boolean
+): Promise<{ receipt?: { receiptId: string; committedRevision: number } }> {
+  return post("/_control/mutate", {
+    operationId: randomUUID(),
+    ...skeleton.selection,
+    expectedRevision: skeleton.revision,
+    occurrenceIds,
+    requireComplete,
+    action,
+  }) as Promise<{ receipt?: { receiptId: string; committedRevision: number } }>;
+}
+
+export async function runCommand(args: string[]): Promise<void> {
 
   const command = args[0];
 
@@ -571,13 +656,25 @@ export async function runCommand(args: string[]): Promise<void> {
         console.log(ids.join("\n"));
         break;
       }
-
-      const result = (await post("/_control/evict", {
-        ids,
-        mediaType: mediaType ?? undefined,
-        occurrences: occurrences ?? undefined,
-      })) as { message?: string; resolvedCount?: number };
-      console.log(result.message ?? "ok");
+      const skeleton = await currentSkeleton();
+      let occurrenceIds = exactOccurrenceIds(skeleton, ids);
+      if (mediaType) {
+        occurrenceIds = occurrenceIds.filter((id) =>
+          skeleton.occurrences.find((item) => item.occurrenceId === id)?.kind === mediaType
+        );
+        if (occurrenceIds.length === 0) throw new Error(`No selected ${mediaType} occurrence exists`);
+      }
+      if (occurrences) {
+        occurrenceIds = occurrenceIds.filter((_, index) => occurrences.includes(index + 1));
+        if (occurrenceIds.length === 0) throw new Error("No selected media occurrence number exists");
+      }
+      const result = await mutateV2(
+        skeleton,
+        occurrenceIds,
+        { kind: "evict" },
+        !args.includes("--allow-protected-residue")
+      );
+      console.log(`Committed revision ${result.receipt?.committedRevision} (receipt ${result.receipt?.receiptId})`);
       break;
     }
 
@@ -593,10 +690,11 @@ export async function runCommand(args: string[]): Promise<void> {
         );
         process.exit(1);
       }
-      const result = (await post("/_control/replace", { ids: [id], content })) as {
-        message?: string;
-      };
-      console.log(result.message ?? "ok");
+      const skeleton = await currentSkeleton();
+      const occurrenceIds = exactOccurrenceIds(skeleton, [id]);
+      if (occurrenceIds.length !== 1) throw new Error("replace requires one exact occurrence");
+      const result = await mutateV2(skeleton, occurrenceIds, { kind: "replace", content }, true);
+      console.log(`Committed revision ${result.receipt?.committedRevision} (receipt ${result.receipt?.receiptId})`);
       break;
     }
 
@@ -606,32 +704,38 @@ export async function runCommand(args: string[]): Promise<void> {
         console.error("Usage: context-surgeon restore <id>");
         process.exit(1);
       }
-      const result = (await post("/_control/restore", { ids: [id] })) as {
-        message?: string;
-      };
-      console.log(result.message ?? "ok");
+      const skeleton = await currentSkeleton();
+      const occurrenceIds = exactOccurrenceIds(skeleton, [id]);
+      const surgeryIds = occurrenceIds.flatMap((occurrenceId) =>
+        skeleton.occurrences.find((item) => item.occurrenceId === occurrenceId)?.activeSurgeryIds ?? []
+      );
+      if (surgeryIds.length === 0) throw new Error("No active surgery exists for that exact occurrence");
+      const result = await mutateV2(skeleton, occurrenceIds, { kind: "reverse", surgeryIds }, true);
+      console.log(`Committed reversal revision ${result.receipt?.committedRevision} (receipt ${result.receipt?.receiptId})`);
       break;
     }
 
     case "status": {
-      const result = await get("/_control/status");
-      console.log(formatStatusOutput(result as StatusResponse));
+      const selection = await exactSelection();
+      const result = await get(`/_control/status?${selectionQuery(selection)}`);
+      console.log(JSON.stringify(result, null, 2));
       break;
     }
 
     case "skeleton": {
-      const result = await get("/_control/skeleton");
-      if (args.includes("--json")) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(formatSkeletonOutput(result as SkeletonResponse));
-      }
+      const result = await currentSkeleton();
+      console.log(JSON.stringify(result, null, args.includes("--json") ? 2 : 0));
+      break;
+    }
+
+    case "doctor": {
+      console.log(JSON.stringify(await get("/_control/doctor"), null, 2));
       break;
     }
 
     default:
       console.error(
-        `Unknown command: ${command}\n\nAvailable commands:\n  evict <id> [--media image|document] [--occurrences 1,3]\n  evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2\n  replace <id> --content "summary"\n  restore <id>\n  status\n  skeleton [--json]`
+        `Unknown command: ${command}\n\nAvailable commands:\n  evict <id> [--media image|document] [--occurrences 1,3]\n  evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2\n  replace <id> --content "summary"\n  restore <id>\n  status\n  skeleton [--json]\n  doctor`
       );
       process.exit(1);
   }
