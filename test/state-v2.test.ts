@@ -137,6 +137,18 @@ describe("v2 identity", () => {
     expect(tracker.observe([hash("a"), hash("d")]).identity.confidence).toBe("ambiguous");
   });
 
+  it("recognizes a replay of one uniquely owned historical observation", () => {
+    const tracker = new PristineHistoryTracker(hash("session-replay"));
+    const first = tracker.observe([hash("a")]);
+    tracker.observe([hash("a"), hash("b")]);
+    const replay = tracker.observe([hash("a")]);
+    expect(replay.identity).toMatchObject({
+      conversationId: first.identity.conversationId,
+      branchId: first.identity.branchId,
+      confidence: "unique-extension",
+    });
+  });
+
   it("rejects duplicate ordinal aliases, including reused tool call ids", () => {
     const sessionId = hash("session");
     const branchId = randomUUID();

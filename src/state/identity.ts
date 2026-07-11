@@ -204,10 +204,15 @@ export class PristineHistoryTracker {
     if (branches.length === 0) return this.createConversation(history, confidence);
 
     const exact = branches.filter((branch) =>
-      branch.history.length === history.length && isPrefix(branch.history, history)
+      branch.observations.some(
+        (observation) =>
+          observation.length === history.length && isPrefix(observation, history)
+      )
     );
     if (exact.length === 1) return this.result(exact[0], confidence);
-    if (exact.length > 1) return this.ambiguous("history is equal on multiple branches");
+    if (exact.length > 1) {
+      return this.ambiguous("historical request is owned by multiple branches");
+    }
 
     const extensions = branches.filter((branch) =>
       branch.history.length < history.length && isPrefix(branch.history, history)
