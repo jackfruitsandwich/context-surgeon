@@ -18,9 +18,20 @@ const commandModeCommands = new Set([
   "skeleton",
 ]);
 
+function printGuide(): void {
+  try {
+    process.stdout.write(readFileSync(new URL("../guide.md", import.meta.url), "utf8"));
+  } catch {
+    console.error("Error: the packaged context-surgeon guide is missing");
+    process.exitCode = 1;
+  }
+}
+
 // Command mode works inside wrapped sessions via CONTEXT_SURGEON_PORT, and
 // from normal shells via the session port file.
-if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) {
+if (args[0] === "guide") {
+  printGuide();
+} else if (process.env.CONTEXT_SURGEON_PORT || commandModeCommands.has(args[0] ?? "")) {
   runCommand(args).catch((err) => {
     console.error("Error:", err instanceof Error ? err.message : err);
     process.exit(1);
@@ -47,18 +58,19 @@ Usage:
   context-surgeon codex [args...]    Launch Codex with context surgery enabled
   context-surgeon claude [args...]   Launch Claude Code with context surgery enabled
   context-surgeon claude-ev [args...] Launch the claude-ev build with context surgery enabled
-  context-surgeon cursor             Start proxy + tunnel for Cursor IDE (BYOK base URL override)
-                                     Use --no-tunnel for local-only mode
+  context-surgeon cursor --experimental
+                                     Experimental isolated model tunnel for Cursor;
+                                     unsupported until the B3b translation gate
+  context-surgeon guide              Print the full agent operating manual
 
 When running inside a session:
-  context-surgeon evict <id> [--media image|document] [--occurrences 1,3]
-                                                Evict a whole unit or just media blocks
-  context-surgeon evict --turn 2..5 --assistant 7.1,7.3 --tool-result 8,9.2
-                                                Evict several targets in one command
-  context-surgeon replace <id> --content "..."  Replace content with summary
-  context-surgeon restore <id>                  Restore evicted/replaced content
-  context-surgeon status                        Show context surgery state
-  context-surgeon skeleton [--json]             Print the current context skeleton`);
+  context-surgeon skeleton [--json]             Show current revision and occurrence IDs
+  context-surgeon evict <occurrence-id> [--require-complete]
+                                                Commit an eviction for one occurrence
+  context-surgeon replace <occurrence-id> --content "..."
+                                                Commit reviewed replacement text
+  context-surgeon restore <occurrence-id>       Commit a reversal
+  context-surgeon status                        Show intent, reconciliation, attempt, and usage truth`);
     process.exit(target ? 1 : 0);
   }
 }

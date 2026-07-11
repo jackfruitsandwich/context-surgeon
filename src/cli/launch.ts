@@ -1,361 +1,321 @@
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { startProxy } from "../proxy/server.js";
+import { join } from "node:path";
+import { startProxy, type SupportedRouteHandler } from "../proxy/server.js";
+import type { ControlPlaneBootstrap } from "../runtime/control-listener.js";
+import {
+  loadPackageVersion,
+  loadPackagedText,
+  printStartupBanner,
+  registerRuntimeRecord,
+} from "../runtime/bootstrap.js";
+import {
+  classifyCodexLaunch,
+  probeCodexAuthMode,
+  readUserCodexConfig,
+  type CodexLaunchPlan,
+} from "../runtime/launch-mode.js";
+import { runWrappedChild } from "../runtime/process-lifecycle.js";
+import { policyForMode, type ModelTrafficPolicy } from "../runtime/traffic-policy.js";
+import { startCloudflaredTunnel } from "../runtime/tunnel.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+type Target = "codex" | "claude" | "claude-ev";
+
+export type RuntimeIntegrations = Readonly<{
+  controlPlaneBootstrap?: ControlPlaneBootstrap;
+  supportedRouteHandler?: SupportedRouteHandler;
+}>;
+
+function surgeryDisabled(env: NodeJS.ProcessEnv): boolean {
+  return env.CONTEXT_SURGEON_DISABLE_SURGERY === "1";
+}
 
 function loadSkillMarkdown(): string {
   try {
-    return readFileSync(getSkillPath(), "utf-8");
+    return loadPackagedText("skill.md").trim();
   } catch {
     console.error("[context-surgeon] Warning: could not load skill.md");
     return "";
   }
 }
 
-function getSkillPath(): string {
-  return join(__dirname, "..", "..", "skill.md");
-}
-
-type Target = "codex" | "claude" | "claude-ev";
-
-function hasConfigOverride(args: string[], key: string): boolean {
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if ((arg === "-c" || arg === "--config") && args[i + 1]) {
-      if (args[i + 1].trim().startsWith(`${key}=`)) {
-        return true;
-      }
-      i += 1;
-      continue;
-    }
-
-    if (arg.startsWith("-c") && arg.slice(2).trim().startsWith(`${key}=`)) {
-      return true;
-    }
-
-    if (arg.startsWith("--config=")) {
-      const value = arg.slice("--config=".length).trim();
-      if (value.startsWith(`${key}=`)) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function hasOption(args: string[], shortFlag: string, longFlag: string): boolean {
-  return args.some(
-    (arg) => arg === shortFlag || arg === longFlag || arg.startsWith(`${longFlag}=`)
-  );
-}
-
-function userConfigHasTopLevelModelProvider(): boolean {
-  try {
-    const raw = readFileSync(join(homedir(), ".codex", "config.toml"), "utf-8");
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) {
-        continue;
-      }
-      if (trimmed.startsWith("[")) {
-        return false;
-      }
-      if (/^model_provider\s*=/.test(trimmed)) {
-        return true;
-      }
-    }
-  } catch {
-    return false;
-  }
-
-  return false;
-}
-
-function loadPackageVersion(): string {
-  try {
-    const parsed = JSON.parse(
-      readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8")
-    ) as { version?: string };
-    return parsed.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-type PortCleanup = () => void;
-
-/**
- * Every proxy writes its own record under ports/; the legacy single `port`
- * file is kept for older CLI binaries but is only removed on exit if it still
- * holds our port (a newer session may have overwritten it).
- */
-function registerPortFiles(port: number, target: string): PortCleanup {
-  const baseDir = join(homedir(), ".context-surgeon");
-  const portsDir = join(baseDir, "ports");
-  mkdirSync(portsDir, { recursive: true });
-
-  const recordPath = join(portsDir, `${port}.json`);
-  writeFileSync(
-    recordPath,
-    JSON.stringify({
-      pid: process.pid,
-      port,
-      target,
-      startedAt: new Date().toISOString(),
-    })
-  );
-
-  const legacyPath = join(baseDir, "port");
-  writeFileSync(legacyPath, String(port));
-
-  return () => {
-    try { unlinkSync(recordPath); } catch {}
-    try {
-      if (readFileSync(legacyPath, "utf-8").trim() === String(port)) {
-        unlinkSync(legacyPath);
-      }
-    } catch {}
+function upstreamConfiguration(env: NodeJS.ProcessEnv): {
+  upstreamOpenAI: string;
+  upstreamChatGPT: string;
+  upstreamAnthropic: string;
+} {
+  return {
+    upstreamOpenAI:
+      env.CONTEXT_SURGEON_UPSTREAM_OPENAI || "https://api.openai.com/v1",
+    upstreamChatGPT:
+      env.CONTEXT_SURGEON_UPSTREAM_CHATGPT || "https://chatgpt.com/backend-api",
+    upstreamAnthropic:
+      env.CONTEXT_SURGEON_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",
   };
 }
 
-async function startConfiguredProxy(target: string): Promise<{
-  proxy: Awaited<ReturnType<typeof startProxy>>;
-  cleanupPortFiles: PortCleanup;
-}> {
-  const skillMarkdown = loadSkillMarkdown();
-
-  const maxTokens = parseInt(
-    process.env.CONTEXT_SURGEON_MAX_TOKENS || "128000",
-    10
-  );
-
-  const upstreamOpenAI =
-    process.env.CONTEXT_SURGEON_UPSTREAM_OPENAI ||
-    process.env.OPENAI_BASE_URL ||
-    "https://api.openai.com/v1";
-
-  const upstreamChatGPT =
-    process.env.CONTEXT_SURGEON_UPSTREAM_CHATGPT ||
-    "https://chatgpt.com/backend-api";
-
-  const upstreamAnthropic =
-    process.env.CONTEXT_SURGEON_UPSTREAM_ANTHROPIC ||
-    process.env.ANTHROPIC_BASE_URL ||
-    "https://api.anthropic.com";
-
-  const proxy = await startProxy({
-    skillMarkdown,
-    maxTokens,
-    upstreamOpenAI,
-    upstreamAnthropic,
-    upstreamChatGPT,
+async function launchExplicitBypass(target: Target, args: readonly string[]): Promise<void> {
+  const sessionId = randomUUID();
+  printStartupBanner({
     target,
-    version: loadPackageVersion(),
-    directivesPath: process.env.CONTEXT_SURGEON_DIRECTIVES_PATH || undefined,
+    mode: "explicit-bypass",
+    upstreamClass: "native client configuration",
+    authClass: "native client configuration",
+    modelPort: null,
+    controlAddress: null,
+    sessionId,
+    identitySource: "fresh launch",
+    persistencePath: "none — explicit bypass",
+    guarantee: { kind: "bypass-explicit" },
   });
-
-  const cleanupPortFiles = registerPortFiles(proxy.port, target);
-
-  return { proxy, cleanupPortFiles };
+  const code = await runWrappedChild({
+    command: target,
+    args,
+    env: { ...process.env },
+    runtime: { close: async () => undefined },
+  });
+  process.exitCode = code;
 }
 
-/**
- * Cursor mode: Cursor routes BYOK requests through its own backend, so the
- * proxy must be reachable from the public internet. We expose it through a
- * cloudflared quick tunnel and the user pastes the tunnel URL into
- * Cursor → Settings → Models → API Keys → "Override OpenAI Base URL".
- */
-export async function launchCursor(extraArgs: string[]): Promise<void> {
-  const { proxy, cleanupPortFiles } = await startConfiguredProxy("cursor");
-  const localBase = `http://127.0.0.1:${proxy.port}/v1`;
-  const noTunnel = extraArgs.includes("--no-tunnel");
-
-  function shutdown(code: number): void {
-    const summary = proxy.getShutdownDirectiveSummary();
-    if (summary) {
-      console.error(`\n${summary}`);
-    }
-    cleanupPortFiles();
-    proxy.close();
-    process.exit(code);
-  }
-
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => shutdown(0));
-  }
-
-  if (noTunnel) {
-    printCursorInstructions(localBase, false);
-    return; // keep running until Ctrl-C (proxy server holds the event loop)
-  }
-
-  const { spawn } = await import("node:child_process");
-  const tunnel = spawn(
-    "cloudflared",
-    ["tunnel", "--url", `http://127.0.0.1:${proxy.port}`],
-    { stdio: ["ignore", "pipe", "pipe"] }
+function rejectedPlanError(plan: Extract<CodexLaunchPlan, { supported: false }>): Error {
+  return new Error(
+    `${plan.reason}. Context Surgeon will not launch a paid, unmodified request. ` +
+      "Use CONTEXT_SURGEON_DISABLE_SURGERY=1 to choose transparent bypass before launch."
   );
+}
 
-  let printed = false;
-  const onTunnelOutput = (chunk: Buffer): void => {
-    if (printed) return;
-    const match = chunk
-      .toString("utf-8")
-      .match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (match) {
-      printed = true;
-      printCursorInstructions(`${match[0]}/v1`, true);
-    }
-  };
-  tunnel.stdout.on("data", onTunnelOutput);
-  tunnel.stderr.on("data", onTunnelOutput);
-
-  tunnel.on("error", () => {
-    console.error(
-      `[context-surgeon] cloudflared not found — install it to expose the proxy publicly:
-  brew install cloudflared          (macOS)
-  https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-
-Cursor's backend makes the model requests, so it cannot reach localhost directly.
-Falling back to local-only mode (works for tools that run on this machine):`
+async function startConfiguredProxy(input: {
+  target: string;
+  sessionId: string;
+  trafficPolicy: ModelTrafficPolicy;
+  integrations: RuntimeIntegrations;
+}) {
+  if (!input.integrations.supportedRouteHandler) {
+    throw new Error(
+      "The B1 exact-dispatch handler is not integrated. Refusing to start the legacy " +
+        "raw-fallback request path; surgery is not active."
     );
-    printCursorInstructions(localBase, false);
-  });
-
-  tunnel.on("exit", (code) => {
-    if (printed) {
-      console.error(`[context-surgeon] Tunnel exited (code ${code ?? 0}), shutting down`);
-      shutdown(code ?? 0);
-    }
-  });
-
-  process.on("exit", () => {
-    try { tunnel.kill(); } catch {}
+  }
+  const maxTokens = parseInt(process.env.CONTEXT_SURGEON_MAX_TOKENS || "128000", 10);
+  return await startProxy({
+    skillMarkdown: loadSkillMarkdown(),
+    maxTokens,
+    ...upstreamConfiguration(process.env),
+    target: input.target,
+    version: loadPackageVersion(),
+    sessionId: input.sessionId,
+    trafficPolicy: input.trafficPolicy,
+    controlPlaneBootstrap: input.integrations.controlPlaneBootstrap,
+    supportedRouteHandler: input.integrations.supportedRouteHandler,
+    // Never load the cross-session v1 directive file from the v2 launcher.
+    directivesPath: null,
   });
 }
 
-function printCursorInstructions(baseUrl: string, isPublic: boolean): void {
-  console.error(`
-[context-surgeon] Proxy ready for Cursor.
-
-  1. Open Cursor → Settings → Cursor Settings → Models → API Keys
-  2. Enable "OpenAI API Key" and paste your OpenAI API key
-  3. Enable "Override OpenAI Base URL" and set it to:
-
-       ${baseUrl}
-
-  4. Click "Verify" — Cursor's backend will route model calls through this proxy
-  5. Chat away. The agent can run context-surgeon evict/replace/restore/status
-     from the integrated terminal.
-${isPublic ? "" : `
-  NOTE: this URL is local-only. Cursor's backend cannot reach it — install
-  cloudflared for a public tunnel, or use this mode for local testing only.
-`}
-  Ctrl-C to stop.`);
+function installRuntimeRecord(input: {
+  target: string;
+  mode: string;
+  sessionId: string;
+  proxy: Awaited<ReturnType<typeof startConfiguredProxy>>;
+}): () => void {
+  return registerRuntimeRecord({
+    pid: process.pid,
+    target: input.target,
+    mode: input.mode,
+    sessionId: input.sessionId,
+    modelPort: input.proxy.modelPort,
+    controlAddress: input.proxy.controlAddress,
+    startedAt: new Date().toISOString(),
+    guaranteeAtWrite: input.proxy.guarantee(),
+  });
 }
 
 export async function launch(
   target: Target,
-  extraArgs: string[]
+  extraArgs: string[],
+  integrations: RuntimeIntegrations = {}
 ): Promise<void> {
-  const { proxy, cleanupPortFiles } = await startConfiguredProxy(target);
+  if (surgeryDisabled(process.env)) {
+    await launchExplicitBypass(target, extraArgs);
+    return;
+  }
 
-  const childEnv = { ...process.env };
-  childEnv.CONTEXT_SURGEON_PORT = String(proxy.port);
+  const sessionId = randomUUID();
+  let mode: string;
+  let upstreamClass: string;
+  let authClass: string;
+  let trafficPolicy: ModelTrafficPolicy;
+  let childArgs = [...extraArgs];
 
   if (target === "codex") {
-    const proxyBase = `http://127.0.0.1:${proxy.port}`;
-    const shouldUseProxyProvider =
-      !extraArgs.includes("--oss") &&
-      !process.env.OPENAI_API_KEY &&
-      !hasOption(extraArgs, "-p", "--profile") &&
-      !hasConfigOverride(extraArgs, "profile") &&
-      !hasConfigOverride(extraArgs, "model_provider") &&
-      !userConfigHasTopLevelModelProvider();
-    const providerId = "context_surgeon_chatgpt";
-    const providerArgs = shouldUseProxyProvider
-      ? [
-          "-c",
-          `model_provider="${providerId}"`,
-          "-c",
-          `model_providers.${providerId}.name="Context Surgeon ChatGPT"`,
-          "-c",
-          `model_providers.${providerId}.base_url="${proxyBase}/backend-api/codex"`,
-          "-c",
-          `model_providers.${providerId}.wire_api="responses"`,
-          "-c",
-          `model_providers.${providerId}.requires_openai_auth=true`,
-          "-c",
-          `model_providers.${providerId}.supports_websockets=false`,
-        ]
-      : [];
-    extraArgs = [
-      "-c",
-      `chatgpt_base_url="${proxyBase}/backend-api/"`,
-      "-c",
-      `openai_base_url="${proxyBase}/backend-api/codex"`,
-      ...providerArgs,
-      ...extraArgs,
-    ];
-  } else if (target === "claude" || target === "claude-ev") {
-    childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.port}/anthropic`;
+    const provisional = classifyCodexLaunch({
+      args: extraArgs,
+      env: process.env,
+      authMode: probeCodexAuthMode("codex"),
+      userConfig: readUserCodexConfig(process.env),
+      proxyBase: "http://127.0.0.1:0",
+    });
+    if (!provisional.supported) throw rejectedPlanError(provisional);
+    mode = provisional.mode;
+    upstreamClass = provisional.upstreamClass;
+    authClass = provisional.authClass;
+    trafficPolicy = provisional.trafficPolicy;
+  } else {
+    if (process.env.ANTHROPIC_BASE_URL) {
+      throw new Error(
+        "ANTHROPIC_BASE_URL already selects a custom backend; refusing to replace it. " +
+          "Surgery is not active. Use CONTEXT_SURGEON_DISABLE_SURGERY=1 for explicit bypass."
+      );
+    }
+    mode = "claude-native-auth";
+    upstreamClass = "anthropic-api";
+    authClass = "native Claude credential forwarding";
+    trafficPolicy = policyForMode("claude");
   }
 
-  await launchWrapped(target, extraArgs, childEnv, proxy, cleanupPortFiles);
+  const proxy = await startConfiguredProxy({ target, sessionId, trafficPolicy, integrations });
+  const cleanupRecord = installRuntimeRecord({ target, mode, sessionId, proxy });
+  const childEnv = { ...process.env, ...proxy.controlEnvironment };
+
+  if (target === "codex") {
+    const plan = classifyCodexLaunch({
+      args: extraArgs,
+      env: process.env,
+      authMode: mode === "subscription" ? "chatgpt" : "api-key",
+      userConfig: readUserCodexConfig(process.env),
+      proxyBase: `http://127.0.0.1:${proxy.modelPort}`,
+    });
+    if (!plan.supported) {
+      await proxy.close({ reason: "launch classification changed" });
+      cleanupRecord();
+      throw rejectedPlanError(plan);
+    }
+    childArgs = [...plan.providerArgs, ...extraArgs];
+  } else {
+    childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.modelPort}/anthropic`;
+  }
+
+  printStartupBanner({
+    target,
+    mode,
+    upstreamClass,
+    authClass,
+    modelPort: proxy.modelPort,
+    controlAddress: proxy.controlAddress,
+    sessionId,
+    identitySource: "fresh random launch id",
+    persistencePath: proxy.controlAddress
+      ? join(homedir(), ".context-surgeon", "sessions", sessionId)
+      : null,
+    guarantee: proxy.guarantee(),
+  });
+
+  try {
+    const code = await runWrappedChild({
+      command: target,
+      args: childArgs,
+      env: childEnv,
+      runtime: proxy,
+      cleanup: cleanupRecord,
+    });
+    process.exitCode = code;
+  } catch (error) {
+    console.error(`[context-surgeon] Failed to start ${target}`);
+    throw error;
+  }
 }
 
-async function launchWrapped(
-  target: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  proxy: {
-    port: number;
-    close: () => void;
-    getShutdownDirectiveSummary: () => string | null;
-  },
-  cleanupPortFiles: PortCleanup
+export async function launchCursor(
+  extraArgs: string[],
+  integrations: RuntimeIntegrations = {}
 ): Promise<void> {
-  const { spawn } = await import("node:child_process");
-  let printedShutdownSummary = false;
-
-  console.error(
-    `[context-surgeon] Wrapping '${target}' through proxy on port ${proxy.port}`
-  );
-
-  const child = spawn(target, args, { env, stdio: "inherit" });
-
-  function printShutdownSummary(): void {
-    if (printedShutdownSummary) {
-      return;
-    }
-    printedShutdownSummary = true;
-
-    const summary = proxy.getShutdownDirectiveSummary();
-    if (summary) {
-      console.error(`\n${summary}`);
-    }
+  if (surgeryDisabled(process.env)) {
+    throw new Error(
+      "Cursor has no local child CLI to launch transparently; explicit bypass refuses to start a proxy or tunnel."
+    );
+  }
+  if (!extraArgs.includes("--experimental")) {
+    throw new Error(
+      "Cursor v2 surgery is unsupported until the B3b response-translation gate lands. " +
+        "Pass --experimental to run the isolated model tunnel without a v2 truth guarantee."
+    );
   }
 
-  child.on("exit", (code) => {
-    printShutdownSummary();
-    cleanupPortFiles();
-    proxy.close();
-    process.exit(code ?? 0);
+  const sessionId = randomUUID();
+  const proxy = await startConfiguredProxy({
+    target: "cursor",
+    sessionId,
+    trafficPolicy: policyForMode("cursor-experimental"),
+    integrations,
   });
-
-  child.on("error", (err) => {
-    console.error(`[context-surgeon] Failed to start ${target}: ${err.message}`);
-    printShutdownSummary();
-    proxy.close();
-    process.exit(1);
+  const cleanupRecord = installRuntimeRecord({
+    target: "cursor",
+    mode: "cursor-experimental-unsupported",
+    sessionId,
+    proxy,
   });
+  let tunnel: Awaited<ReturnType<typeof startCloudflaredTunnel>> | null = null;
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string): Promise<void> => {
+    shutdownPromise ??= (async () => {
+      await tunnel?.close();
+      await proxy.close({ reason });
+      cleanupRecord();
+    })();
+    return shutdownPromise;
+  };
 
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => child.kill(sig));
+  try {
+    const noTunnel = extraArgs.includes("--no-tunnel");
+    const baseUrl = noTunnel
+      ? `http://127.0.0.1:${proxy.modelPort}/v1`
+      : `${(
+          tunnel = await startCloudflaredTunnel({
+            modelPort: proxy.modelPort,
+            startupTimeoutMs: parseInt(
+              process.env.CONTEXT_SURGEON_TUNNEL_STARTUP_TIMEOUT_MS || "15000",
+              10
+            ),
+          })
+        ).publicUrl}/v1`;
+
+    printStartupBanner({
+      target: "cursor",
+      mode: "experimental/unsupported until B3b",
+      upstreamClass: "openai-api via Cursor backend",
+      authClass: "Cursor BYOK forwarding",
+      modelPort: proxy.modelPort,
+      controlAddress: proxy.controlAddress,
+      sessionId,
+      identitySource: "fresh random launch id",
+      persistencePath: proxy.controlAddress
+        ? join(homedir(), ".context-surgeon", "sessions", sessionId)
+        : null,
+      guarantee: proxy.guarantee(),
+    });
+    console.error(
+      `[context-surgeon] Cursor model URL: ${baseUrl}\n` +
+        "[context-surgeon] Control is never served on this URL. Ctrl-C to stop."
+    );
+
+    await new Promise<void>((resolve) => {
+      let resolved = false;
+      const stop = (signal: NodeJS.Signals): void => {
+        if (resolved) return;
+        resolved = true;
+        void shutdown(`received ${signal}`).then(resolve);
+      };
+      process.once("SIGINT", () => stop("SIGINT"));
+      process.once("SIGTERM", () => stop("SIGTERM"));
+      tunnel?.child.once("exit", () => {
+        if (resolved) return;
+        resolved = true;
+        console.error("[context-surgeon] Tunnel exited; shutting down instead of falling back");
+        void shutdown("tunnel exited").then(resolve);
+      });
+    });
+  } catch (error) {
+    await shutdown("cursor startup failed");
+    throw error;
   }
 }

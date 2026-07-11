@@ -1,18 +1,20 @@
 {
   "name": "context-surgeon",
   "version": "1.2.0",
-  "description": "Give AI agents the ability to edit their own context window",
+  "description": "Fail-closed, session-scoped context surgery for AI coding agents",
   "type": "module",
   "bin": "dist/index.js",
   "scripts": {
     "build": "rm -rf dist && node --no-maglev ./node_modules/typescript/bin/tsc -p tsconfig.json --pretty false && chmod +x dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run --pool forks --no-file-parallelism",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:package": "npm run build && node scripts/test-packed-install.mjs"
   },
   "files": [
     "dist",
     "skill.md",
+    "guide.md",
     "LICENSE",
     "README.md"
   ],

@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import {
+  classifyCodexLaunch,
+  parseConfigOverrides,
+  parseTopLevelCodexConfig,
+} from "../src/runtime/launch-mode.js";
+
+function classify(input: {
+  args?: string[];
+  env?: NodeJS.ProcessEnv;
+  authMode?: "chatgpt" | "api-key" | "unknown";
+  config?: Readonly<Record<string, string>>;
+} = {}) {
+  return classifyCodexLaunch({
+    args: input.args ?? [],
+    env: input.env ?? {},
+    authMode: input.authMode ?? "chatgpt",
+    userConfig: input.config ?? {},
+    proxyBase: "http://127.0.0.1:4321",
+  });
+}
+
+describe("Codex positive launch classification", () => {
+  it("configures subscription auth without unconditional built-in base URL overrides", () => {
+    const plan = classify();
+    expect(plan.supported).toBe(true);
+    if (!plan.supported) return;
+    expect(plan.mode).toBe("subscription");
+    expect(plan.providerArgs.join(" ")).toContain("context_surgeon_chatgpt");
+    expect(plan.providerArgs.join(" ")).toContain("requires_openai_auth=true");
+    expect(plan.providerArgs.join(" ")).not.toContain("chatgpt_base_url");
+    expect(plan.providerArgs.join(" ")).not.toContain("openai_base_url");
+  });
+
+  it("configures a known environment API key by name without copying its value", () => {
+    const plan = classify({
+      env: { OPENAI_API_KEY: "super-secret-api-key" },
+      authMode: "chatgpt",
+    });
+    expect(plan.supported).toBe(true);
+    if (!plan.supported) return;
+    expect(plan.mode).toBe("api-key");
+    expect(plan.providerArgs.join(" ")).toContain('env_key="OPENAI_API_KEY"');
+    expect(plan.providerArgs.join(" ")).not.toContain("super-secret-api-key");
+    expect(plan.trafficPolicy.expectedPaths).toEqual(["/v1/responses"]);
+  });
+
+  it("uses native stored API-key auth without reading credentials", () => {
+    const plan = classify({ authMode: "api-key" });
+    expect(plan.supported).toBe(true);
+    if (!plan.supported) return;
+    expect(plan.mode).toBe("api-key");
+    expect(plan.providerArgs.join(" ")).toContain("requires_openai_auth=true");
+    expect(plan.providerArgs.join(" ")).not.toContain("env_key");
+  });
+
+  it("supports CODEX_API_KEY only for the documented exec mode", () => {
+    const plan = classify({
+      args: ["exec", "do work"],
+      env: { CODEX_API_KEY: "one-run-secret" },
+      authMode: "unknown",
+    });
+    expect(plan.supported).toBe(true);
+    if (!plan.supported) return;
+    expect(plan.providerArgs.join(" ")).toContain('env_key="CODEX_API_KEY"');
+    expect(plan.providerArgs.join(" ")).not.toContain("one-run-secret");
+
+    expect(
+      classify({ env: { CODEX_API_KEY: "ignored-interactively" }, authMode: "unknown" })
+    ).toMatchObject({ supported: false, mode: "auth-unknown" });
+  });
+
+  it.each([
+    { name: "OSS", input: { args: ["--oss"] }, mode: "oss" },
+    { name: "profile flag", input: { args: ["--profile", "work"] }, mode: "profile" },
+    { name: "attached profile flag", input: { args: ["-pwork"] }, mode: "profile" },
+    { name: "profile config", input: { args: ["-c", 'profile="work"'] }, mode: "profile" },
+    { name: "custom provider arg", input: { args: ["-c", 'model_provider="azure"'] }, mode: "custom-provider" },
+    { name: "custom provider file", input: { config: { model_provider: "ollama" } }, mode: "custom-provider" },
+    { name: "custom URL env", input: { env: { OPENAI_BASE_URL: "https://gateway.test/v1" } }, mode: "custom-base-url" },
+    { name: "custom URL config", input: { config: { openai_base_url: "https://gateway.test/v1" } }, mode: "custom-base-url" },
+    { name: "unknown login", input: { authMode: "unknown" as const }, mode: "auth-unknown" },
+  ])("rejects $name rather than misrouting", ({ input, mode }) => {
+    const plan = classify(input);
+    expect(plan).toMatchObject({ supported: false, mode });
+  });
+
+  it("parses every supported -c spelling without treating arbitrary args as config", () => {
+    expect(
+      parseConfigOverrides([
+        "-c",
+        'model_provider="openai"',
+        "-cforced_login_method='api'",
+        "--config=openai_base_url='https://example.test'",
+        "exec",
+      ])
+    ).toEqual({
+      model_provider: "openai",
+      forced_login_method: "api",
+      openai_base_url: "https://example.test",
+    });
+  });
+
+  it("reads only top-level provider settings from config.toml", () => {
+    expect(
+      parseTopLevelCodexConfig(`
+        model_provider = "openai" # comment
+        forced_login_method = "chatgpt"
+        [profiles.work]
+        model_provider = "custom"
+      `)
+    ).toEqual({ model_provider: "openai", forced_login_method: "chatgpt" });
+  });
+});
