@@ -16,14 +16,18 @@ import {
   type CodexLaunchPlan,
 } from "../runtime/launch-mode.js";
 import { runWrappedChild } from "../runtime/process-lifecycle.js";
+import { createProductionRuntimeIntegrations } from "../runtime/production-integrations.js";
 import { policyForMode, type ModelTrafficPolicy } from "../runtime/traffic-policy.js";
 import { startCloudflaredTunnel } from "../runtime/tunnel.js";
 
 type Target = "codex" | "claude" | "claude-ev";
 
 export type RuntimeIntegrations = Readonly<{
+  sessionId?: string;
+  sessionDirectory?: string;
   controlPlaneBootstrap?: ControlPlaneBootstrap;
   supportedRouteHandler?: SupportedRouteHandler;
+  close?: () => Promise<void>;
 }>;
 
 function surgeryDisabled(env: NodeJS.ProcessEnv): boolean {
@@ -97,18 +101,33 @@ async function startConfiguredProxy(input: {
     );
   }
   const maxTokens = parseInt(process.env.CONTEXT_SURGEON_MAX_TOKENS || "128000", 10);
-  return await startProxy({
-    skillMarkdown: loadSkillMarkdown(),
-    maxTokens,
-    ...upstreamConfiguration(process.env),
-    target: input.target,
+  try {
+    return await startProxy({
+      skillMarkdown: loadSkillMarkdown(),
+      maxTokens,
+      ...upstreamConfiguration(process.env),
+      target: input.target,
+      version: loadPackageVersion(),
+      sessionId: input.sessionId,
+      trafficPolicy: input.trafficPolicy,
+      controlPlaneBootstrap: input.integrations.controlPlaneBootstrap,
+      supportedRouteHandler: input.integrations.supportedRouteHandler,
+      // Never load the cross-session v1 directive file from the v2 launcher.
+      directivesPath: null,
+    });
+  } catch (error) {
+    await input.integrations.close?.();
+    throw error;
+  }
+}
+
+function integrationsForLaunch(
+  target: string,
+  supplied: RuntimeIntegrations | undefined
+): RuntimeIntegrations {
+  return supplied ?? createProductionRuntimeIntegrations({
+    target,
     version: loadPackageVersion(),
-    sessionId: input.sessionId,
-    trafficPolicy: input.trafficPolicy,
-    controlPlaneBootstrap: input.integrations.controlPlaneBootstrap,
-    supportedRouteHandler: input.integrations.supportedRouteHandler,
-    // Never load the cross-session v1 directive file from the v2 launcher.
-    directivesPath: null,
   });
 }
 
@@ -133,14 +152,15 @@ function installRuntimeRecord(input: {
 export async function launch(
   target: Target,
   extraArgs: string[],
-  integrations: RuntimeIntegrations = {}
+  integrations?: RuntimeIntegrations
 ): Promise<void> {
   if (surgeryDisabled(process.env)) {
     await launchExplicitBypass(target, extraArgs);
     return;
   }
 
-  const sessionId = randomUUID();
+  const activeIntegrations = integrationsForLaunch(target, integrations);
+  const sessionId = activeIntegrations.sessionId ?? randomUUID();
   let mode: string;
   let upstreamClass: string;
   let authClass: string;
@@ -173,8 +193,19 @@ export async function launch(
     trafficPolicy = policyForMode("claude");
   }
 
-  const proxy = await startConfiguredProxy({ target, sessionId, trafficPolicy, integrations });
-  const cleanupRecord = installRuntimeRecord({ target, mode, sessionId, proxy });
+  const proxy = await startConfiguredProxy({
+    target,
+    sessionId,
+    trafficPolicy,
+    integrations: activeIntegrations,
+  });
+  let cleanupRecord: () => void;
+  try {
+    cleanupRecord = installRuntimeRecord({ target, mode, sessionId, proxy });
+  } catch (error) {
+    await proxy.close({ reason: "runtime record setup failed" });
+    throw error;
+  }
   const childEnv = { ...process.env, ...proxy.controlEnvironment };
 
   if (target === "codex") {
@@ -205,7 +236,8 @@ export async function launch(
     sessionId,
     identitySource: "fresh random launch id",
     persistencePath: proxy.controlAddress
-      ? join(homedir(), ".context-surgeon", "sessions", sessionId)
+      ? activeIntegrations.sessionDirectory ??
+        join(homedir(), ".context-surgeon", "sessions", sessionId)
       : null,
     guarantee: proxy.guarantee(),
   });
@@ -227,7 +259,7 @@ export async function launch(
 
 export async function launchCursor(
   extraArgs: string[],
-  integrations: RuntimeIntegrations = {}
+  integrations?: RuntimeIntegrations
 ): Promise<void> {
   if (surgeryDisabled(process.env)) {
     throw new Error(
@@ -241,12 +273,13 @@ export async function launchCursor(
     );
   }
 
-  const sessionId = randomUUID();
+  const activeIntegrations = integrationsForLaunch("cursor", integrations);
+  const sessionId = activeIntegrations.sessionId ?? randomUUID();
   const proxy = await startConfiguredProxy({
     target: "cursor",
     sessionId,
     trafficPolicy: policyForMode("cursor-experimental"),
-    integrations,
+    integrations: activeIntegrations,
   });
   const cleanupRecord = installRuntimeRecord({
     target: "cursor",
@@ -289,7 +322,8 @@ export async function launchCursor(
       sessionId,
       identitySource: "fresh random launch id",
       persistencePath: proxy.controlAddress
-        ? join(homedir(), ".context-surgeon", "sessions", sessionId)
+        ? activeIntegrations.sessionDirectory ??
+          join(homedir(), ".context-surgeon", "sessions", sessionId)
         : null,
       guarantee: proxy.guarantee(),
     });
@@ -318,4 +352,9 @@ export async function launchCursor(
     await shutdown("cursor startup failed");
     throw error;
   }
+}
+
+/** Explicit entry point used by the packaged CLI; launch() has the same default. */
+export async function launchProduction(target: Target, extraArgs: string[]): Promise<void> {
+  await launch(target, extraArgs);
 }

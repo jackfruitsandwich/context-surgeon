@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { launch, launchCursor } from "./cli/launch.js";
+import { launchCursor, launchProduction } from "./cli/launch.js";
 import { runCommand } from "./cli/commands.js";
 
 const packageJson = JSON.parse(
@@ -42,7 +42,7 @@ if (args[0] === "guide") {
   const extraArgs = args.slice(1);
 
   if (target === "codex" || target === "claude" || target === "claude-ev") {
-    launch(target, extraArgs).catch((err) => {
+    launchProduction(target, extraArgs).catch((err) => {
       console.error("Error:", err instanceof Error ? err.message : err);
       process.exit(1);
     });

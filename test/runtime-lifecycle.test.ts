@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -44,18 +44,24 @@ async function waitForFile(path: string): Promise<void> {
 }
 
 describe("spawned process lifecycle", () => {
-  it("refuses active launch when the B1 exact-dispatch seam is absent", async () => {
+  it("uses production integrations by default and refuses launch when their setup fails", async () => {
     const oldDisable = process.env.CONTEXT_SURGEON_DISABLE_SURGERY;
     const oldBase = process.env.ANTHROPIC_BASE_URL;
+    const oldSessions = process.env.CONTEXT_SURGEON_SESSIONS_DIRECTORY;
+    const blockedSessions = join(temporaryDirectory(), "sessions-not-a-directory");
+    writeFileSync(blockedSessions, "blocked");
     delete process.env.CONTEXT_SURGEON_DISABLE_SURGERY;
     delete process.env.ANTHROPIC_BASE_URL;
+    process.env.CONTEXT_SURGEON_SESSIONS_DIRECTORY = blockedSessions;
     try {
-      await expect(launch("claude", [])).rejects.toThrow(/B1 exact-dispatch handler/);
+      await expect(launch("claude", [])).rejects.toThrow(/EEXIST|ENOTDIR|not a directory/);
     } finally {
       if (oldDisable === undefined) delete process.env.CONTEXT_SURGEON_DISABLE_SURGERY;
       else process.env.CONTEXT_SURGEON_DISABLE_SURGERY = oldDisable;
       if (oldBase === undefined) delete process.env.ANTHROPIC_BASE_URL;
       else process.env.ANTHROPIC_BASE_URL = oldBase;
+      if (oldSessions === undefined) delete process.env.CONTEXT_SURGEON_SESSIONS_DIRECTORY;
+      else process.env.CONTEXT_SURGEON_SESSIONS_DIRECTORY = oldSessions;
     }
   });
 

@@ -30,11 +30,15 @@ export async function startControlSocket(
       resolve();
     });
   });
-  chmodSync(socketPath, 0o600);
-  const mode = lstatSync(socketPath).mode & 0o777;
-  if (mode !== 0o600) {
+  try {
+    chmodSync(socketPath, 0o600);
+    const mode = lstatSync(socketPath).mode & 0o777;
+    if (mode !== 0o600) {
+      throw new Error(`Control socket permissions are ${mode.toString(8)}, expected 600`);
+    }
+  } catch (error) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw new Error(`Control socket permissions are ${mode.toString(8)}, expected 600`);
+    throw error;
   }
   return Object.freeze({
     server,
