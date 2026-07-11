@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyCodexLaunch,
+  injectCodexProviderArgs,
   parseConfigOverrides,
   parseTopLevelCodexConfig,
 } from "../src/runtime/launch-mode.js";
@@ -52,6 +53,22 @@ describe("Claude launch safety defaults", () => {
 });
 
 describe("Codex positive launch classification", () => {
+  it("injects provider config into the active Codex command scope", () => {
+    const provider = ["-c", 'model_provider="context_surgeon_chatgpt"'];
+    expect(injectCodexProviderArgs(["exec", "-m", "gpt-5.4-mini", "work"], provider))
+      .toEqual(["exec", "-m", "gpt-5.4-mini", "work", ...provider]);
+    expect(injectCodexProviderArgs(["-a", "never", "exec", "review", "--uncommitted"], provider))
+      .toEqual(["-a", "never", "exec", "review", "--uncommitted", ...provider]);
+    expect(injectCodexProviderArgs(["resume", "--last"], provider))
+      .toEqual(["resume", "--last", ...provider]);
+    expect(injectCodexProviderArgs(["exec", "--", "literal", "-c", "model_provider=ignored"], provider))
+      .toEqual(["exec", ...provider, "--", "literal", "-c", "model_provider=ignored"]);
+    expect(injectCodexProviderArgs(["-m", "review", "interactive prompt"], provider))
+      .toEqual([...provider, "-m", "review", "interactive prompt"]);
+    expect(injectCodexProviderArgs(["interactive prompt"], provider))
+      .toEqual([...provider, "interactive prompt"]);
+  });
+
   it("configures subscription auth without unconditional built-in base URL overrides", () => {
     const plan = classify();
     expect(plan.supported).toBe(true);
@@ -107,6 +124,12 @@ describe("Codex positive launch classification", () => {
     { name: "attached profile flag", input: { args: ["-pwork"] }, mode: "profile" },
     { name: "profile config", input: { args: ["-c", 'profile="work"'] }, mode: "profile" },
     { name: "custom provider arg", input: { args: ["-c", 'model_provider="azure"'] }, mode: "custom-provider" },
+    { name: "explicit built-in provider arg", input: { args: ["-c", 'model_provider="openai"'] }, mode: "custom-provider" },
+    { name: "provider definition arg", input: { args: ["exec", "-c", 'model_providers.context_surgeon_chatgpt.base_url="https://bypass.test"'] }, mode: "custom-provider" },
+    { name: "provider table arg", input: { args: ["exec", "-c", 'model_providers={context_surgeon_chatgpt={base_url="https://bypass.test"}}'] }, mode: "custom-provider" },
+    { name: "remote mode", input: { args: ["resume", "--remote", "ws://127.0.0.1:9000"] }, mode: "remote" },
+    { name: "remote auth mode", input: { args: ["fork", "--remote-auth-token-env=TOKEN"] }, mode: "remote" },
+    { name: "local provider", input: { args: ["--local-provider", "ollama"] }, mode: "oss" },
     { name: "custom provider file", input: { config: { model_provider: "ollama" } }, mode: "custom-provider" },
     { name: "custom URL env", input: { env: { OPENAI_BASE_URL: "https://gateway.test/v1" } }, mode: "custom-base-url" },
     { name: "custom URL config", input: { config: { openai_base_url: "https://gateway.test/v1" } }, mode: "custom-base-url" },

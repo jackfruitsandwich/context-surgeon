@@ -37,20 +37,22 @@ async function proxyFor(
 async function request(input: {
   port: number;
   path: string;
+  method?: "GET" | "POST";
   authorization?: string;
   body?: string;
 }): Promise<{ status: number; body: string }> {
   return await new Promise((resolve, reject) => {
-    const body = input.body ?? "{}";
+    const method = input.method ?? "POST";
+    const body = method === "POST" ? input.body ?? "{}" : "";
     const req = http.request(
       {
         host: "127.0.0.1",
         port: input.port,
         path: input.path,
-        method: "POST",
+        method,
         headers: {
           "content-type": "application/json",
-          "content-length": Buffer.byteLength(body),
+          ...(method === "POST" ? { "content-length": Buffer.byteLength(body) } : {}),
           ...(input.authorization ? { authorization: input.authorization } : {}),
         },
       },
@@ -103,6 +105,44 @@ describe("model listener truth and isolation", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(proxy.guarantee().kind).toBe("unverified");
+  });
+
+  it("forwards Codex subscription model discovery to the ChatGPT upstream", async () => {
+    let observedUrl = "";
+    const upstream = http.createServer((req, res) => {
+      observedUrl = req.url ?? "";
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"models":[]}');
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("missing upstream port");
+
+    const proxy = await startProxy({
+      skillMarkdown: "",
+      maxTokens: 128_000,
+      upstreamOpenAI: "http://127.0.0.1:9/v1",
+      upstreamAnthropic: "http://127.0.0.1:9",
+      upstreamChatGPT: `http://127.0.0.1:${address.port}/backend-api`,
+      directivesPath: null,
+      trafficPolicy: policyForMode("codex-subscription"),
+      supportedRouteHandler: async () => true,
+    });
+    running.push(proxy);
+    try {
+      const response = await request({
+        port: proxy.modelPort,
+        path: "/backend-api/codex/models?client_version=0.144.0",
+        method: "GET",
+        authorization: "Bearer secret",
+      });
+      expect(response.status).toBe(200);
+      expect(observedUrl).toBe("/backend-api/codex/models?client_version=0.144.0");
+      expect(proxy.guarantee().kind).toBe("unverified");
+    } finally {
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
   });
 
   it("rejects a supported but wrong observed route without calling the handler", async () => {

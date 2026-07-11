@@ -119,7 +119,10 @@ function jsonError(res: http.ServerResponse, status: number, error: string): voi
 
 function isExplicitOpaqueRoute(method: string, path: string): boolean {
   return (
-    (method === "GET" && (path === "/models" || path === "/v1/models")) ||
+    (method === "GET" &&
+      (path === "/models" ||
+        path === "/v1/models" ||
+        path === "/backend-api/codex/models")) ||
     (method === "POST" &&
       (path === "/v1/messages/count_tokens" ||
         path === "/anthropic/v1/messages/count_tokens"))
@@ -127,6 +130,9 @@ function isExplicitOpaqueRoute(method: string, path: string): boolean {
 }
 
 function opaqueUpstream(url: string, config: HandlerConfig): string {
+  if (url.startsWith("/backend-api/codex/")) {
+    return config.upstreamChatGPT + url.replace(/^\/backend-api/, "");
+  }
   if (url.startsWith("/anthropic")) {
     return config.upstreamAnthropic + (url.replace(/^\/anthropic/, "") || "/");
   }

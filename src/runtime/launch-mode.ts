@@ -19,11 +19,103 @@ export type CodexLaunchPlan =
     }>
   | Readonly<{
       supported: false;
-      mode: "profile" | "custom-provider" | "custom-base-url" | "oss" | "auth-unknown";
+      mode: "profile" | "custom-provider" | "custom-base-url" | "remote" | "oss" | "auth-unknown";
       reason: string;
     }>;
 
 type ConfigOverrides = Readonly<Record<string, string>>;
+
+const CODEX_TOP_LEVEL_COMMANDS = new Set([
+  "exec",
+  "review",
+  "login",
+  "logout",
+  "mcp",
+  "plugin",
+  "mcp-server",
+  "app-server",
+  "remote-control",
+  "app",
+  "completion",
+  "update",
+  "doctor",
+  "sandbox",
+  "debug",
+  "apply",
+  "resume",
+  "archive",
+  "delete",
+  "unarchive",
+  "fork",
+  "cloud",
+  "exec-server",
+  "features",
+]);
+
+const CODEX_OPTIONS_WITH_VALUES = new Set([
+  "-c",
+  "--config",
+  "--remote",
+  "--remote-auth-token-env",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "-a",
+  "--ask-for-approval",
+]);
+
+function commandIndex(
+  args: readonly string[],
+  start: number,
+  commands: ReadonlySet<string>
+): number | null {
+  for (let index = start; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--") return null;
+    if (CODEX_OPTIONS_WITH_VALUES.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) continue;
+    return commands.has(argument) ? index : null;
+  }
+  return null;
+}
+
+/**
+ * Codex subcommands own a separate `-c` scope. Provider overrides placed before
+ * `exec`, `review`, `resume`, etc. are accepted by the parent parser but do not
+ * select the provider used by that subcommand. Put the overrides inside the
+ * deepest model-running command scope; interactive launches keep them at the
+ * top level.
+ */
+export function injectCodexProviderArgs(
+  args: readonly string[],
+  providerArgs: readonly string[]
+): string[] {
+  const topLevel = commandIndex(args, 0, CODEX_TOP_LEVEL_COMMANDS);
+  if (topLevel === null) return [...providerArgs, ...args];
+
+  // Repeated `-c` values are last-one-wins. Put the generated provider values
+  // at the end of the selected subcommand's option scope, but before an
+  // explicit `--` option terminator.
+  const terminator = args.indexOf("--", topLevel + 1);
+  const insertionIndex = terminator === -1 ? args.length : terminator;
+  return [
+    ...args.slice(0, insertionIndex),
+    ...providerArgs,
+    ...args.slice(insertionIndex),
+  ];
+}
 
 function unquote(value: string): string {
   const trimmed = value.trim();
@@ -89,6 +181,10 @@ function hasOption(args: readonly string[], short: string, long: string): boolea
   );
 }
 
+function hasLongOption(args: readonly string[], long: string): boolean {
+  return args.some((arg) => arg === long || arg.startsWith(`${long}=`));
+}
+
 function optionValue(args: readonly string[], short: string, long: string): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -124,6 +220,23 @@ export function classifyCodexLaunch(input: {
   if (input.args.includes("--oss")) {
     return { supported: false, mode: "oss", reason: "Codex OSS mode uses a local backend and is not redirected" };
   }
+  if (hasLongOption(input.args, "--local-provider")) {
+    return {
+      supported: false,
+      mode: "oss",
+      reason: "A Codex local provider uses a backend that is not redirected",
+    };
+  }
+  if (
+    hasLongOption(input.args, "--remote") ||
+    hasLongOption(input.args, "--remote-auth-token-env")
+  ) {
+    return {
+      supported: false,
+      mode: "remote",
+      reason: "Codex remote mode bypasses the local model-request provider",
+    };
+  }
 
   const profile = optionValue(input.args, "-p", "--profile") || overrides.profile || userConfig.profile;
   if (profile || hasOption(input.args, "-p", "--profile")) {
@@ -134,7 +247,21 @@ export function classifyCodexLaunch(input: {
     };
   }
 
-  const provider = overrides.model_provider || userConfig.model_provider;
+  const explicitProvider = Object.prototype.hasOwnProperty.call(overrides, "model_provider");
+  const providerDefinition = Object.keys(overrides).find(
+    (key) => key === "model_providers" || key.startsWith("model_providers.")
+  );
+  if (explicitProvider || providerDefinition) {
+    return {
+      supported: false,
+      mode: "custom-provider",
+      reason: providerDefinition
+        ? `Codex provider override '${providerDefinition}' could replace Context Surgeon's loopback route`
+        : "An explicit Codex model_provider override could replace Context Surgeon's provider after injection",
+    };
+  }
+
+  const provider = userConfig.model_provider;
   if (provider && provider !== "openai") {
     return {
       supported: false,

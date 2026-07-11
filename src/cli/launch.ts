@@ -11,6 +11,7 @@ import {
 } from "../runtime/bootstrap.js";
 import {
   classifyCodexLaunch,
+  injectCodexProviderArgs,
   probeCodexAuthMode,
   readUserCodexConfig,
   type CodexLaunchPlan,
@@ -237,7 +238,7 @@ export async function launch(
       cleanupRecord();
       throw rejectedPlanError(plan);
     }
-    childArgs = [...plan.providerArgs, ...extraArgs];
+    childArgs = injectCodexProviderArgs(extraArgs, plan.providerArgs);
   } else {
     applySafeClaudeEnvironment(childEnv);
     childEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxy.modelPort}/anthropic`;
