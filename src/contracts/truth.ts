@@ -117,6 +117,10 @@ export type UsageProvenance =
 export type AttemptReceipt = Readonly<{
   attemptId: string;
   requestId: string;
+  sessionId: string;
+  branchId: string;
+  stateRevision: number;
+  operationResults: readonly OperationResult[];
   state: AttemptState;
   method: "POST";
   fullUrl: string;

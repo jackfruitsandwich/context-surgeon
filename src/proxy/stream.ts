@@ -96,6 +96,10 @@ export function dispatchArtifact(
       Object.freeze({
         attemptId: artifact.attemptId,
         requestId: artifact.compiled.requestId,
+        sessionId: artifact.compiled.sessionId,
+        branchId: artifact.compiled.branchId,
+        stateRevision: artifact.compiled.stateRevision,
+        operationResults: artifact.compiled.operationResults,
         state,
         method: artifact.method,
         fullUrl: artifact.fullUrl,
