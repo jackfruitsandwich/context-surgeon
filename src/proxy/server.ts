@@ -5,8 +5,13 @@ import type { Directive } from "../context/types.js";
 import { DirectiveStore, defaultDirectivesPath } from "../store/directive-store.js";
 import { ConversationTracker } from "./conversations.js";
 import { handleControl, type ControlContext } from "../api/control.js";
-import { transformRequest, type HandlerConfig } from "./handler.js";
+import type { HandlerConfig } from "./handler.js";
 import { forwardToUpstream } from "./stream.js";
+import {
+  handleSupportedRoute,
+  incomingHeaderRecord,
+  readRequestBody,
+} from "./supported-route.js";
 
 export type ProxyServerOptions = {
   skillMarkdown: string;
@@ -26,15 +31,6 @@ export type ProxyServer = {
   close: () => void;
   getShutdownDirectiveSummary: () => string | null;
 };
-
-function readRequestBody(req: http.IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
 
 function getUpstreamWsUrl(
   reqUrl: string,
@@ -141,91 +137,7 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         return;
       }
 
-      // Proxy API requests (OpenAI /v1/responses, ChatGPT /backend-api/codex/responses, Anthropic /v1/messages)
-      const isProxyable =
-        method === "POST" &&
-        (url.startsWith("/v1/responses") ||
-          url.startsWith("/anthropic/v1/messages") ||
-          url.startsWith("/v1/messages") ||
-          url.startsWith("/v1/chat/completions") ||
-          url.startsWith("/chat/completions") ||
-          url.includes("/codex/responses"));
-
-      if (isProxyable) {
-        const rawBody = await readRequestBody(req);
-
-        if (debug) {
-          console.error(
-            `[debug] body[0..400]: ${rawBody.subarray(0, 400).toString("utf-8")}`
-          );
-        }
-
-        const incomingHeaders: Record<string, string> = {};
-        for (const [key, value] of Object.entries(req.headers)) {
-          if (typeof value === "string") {
-            incomingHeaders[key] = value;
-          } else if (Array.isArray(value)) {
-            incomingHeaders[key] = value.join(", ");
-          }
-        }
-
-        const result = await transformRequest(
-          url,
-          rawBody,
-          incomingHeaders,
-          handlerConfig
-        );
-
-        if (!result) {
-          // A transformable-looking request we could not parse. Forward it
-          // untouched, but never silently: directives are NOT applied here.
-          console.error(
-            `[context-surgeon] WARNING: could not transform ${method} ${url} ` +
-              `(encoding=${incomingHeaders["content-encoding"] ?? "none"}, ` +
-              `${rawBody.length} bytes) — forwarded unmodified, directives NOT applied`
-          );
-          // Determine upstream for raw forward
-          let rawUpstream: string;
-          if (url.includes("/codex/responses")) {
-            rawUpstream = handlerConfig.upstreamChatGPT + url.replace(/^\/backend-api/, "");
-          } else if (url.startsWith("/anthropic/")) {
-            rawUpstream =
-              handlerConfig.upstreamAnthropic + (url.replace(/^\/anthropic/, "") || "/");
-          } else if (url.startsWith("/v1/messages")) {
-            rawUpstream = handlerConfig.upstreamAnthropic + url;
-          } else if (url.startsWith("/chat/completions")) {
-            rawUpstream = handlerConfig.upstreamOpenAI + url;
-          } else {
-            rawUpstream = handlerConfig.upstreamOpenAI + url.replace(/^\/v1/, "");
-          }
-          await forwardToUpstream(
-            {
-              url: rawUpstream,
-              method,
-              headers: incomingHeaders,
-              body: rawBody,
-            },
-            res
-          );
-          return;
-        }
-
-        await forwardToUpstream(
-          {
-            url: result.upstreamUrl,
-            method,
-            headers: result.headers,
-            body: result.body,
-            format: result.format,
-            translateResponse: result.translateResponse,
-            onPromptTokens: (tokens) => {
-              if (result.rootFingerprint) {
-                tracker.notePromptTokens(result.rootFingerprint, tokens);
-              }
-            },
-          },
-          res
-        );
+      if (await handleSupportedRoute(req, res, handlerConfig, debug)) {
         return;
       }
 
@@ -234,14 +146,7 @@ export function startProxy(opts: ProxyServerOptions): Promise<ProxyServer> {
         ? await readRequestBody(req)
         : Buffer.alloc(0);
 
-      const incomingHeaders: Record<string, string> = {};
-      for (const [key, value] of Object.entries(req.headers)) {
-        if (typeof value === "string") {
-          incomingHeaders[key] = value;
-        } else if (Array.isArray(value)) {
-          incomingHeaders[key] = value.join(", ");
-        }
-      }
+      const incomingHeaders = incomingHeaderRecord(req);
 
       // Route based on path prefix
       let upstream: string;
