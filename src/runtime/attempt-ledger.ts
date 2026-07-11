@@ -41,28 +41,43 @@ function isObservation(value: unknown): value is AttemptLedgerObservation {
   );
 }
 
-function loadLatest(path: string): AttemptLedgerObservation | null {
-  if (!existsSync(path)) return null;
+function loadObservations(path: string): readonly AttemptLedgerObservation[] {
+  if (!existsSync(path)) return Object.freeze([]);
   const lines = readFileSync(path, "utf8").split("\n");
-  let latest: AttemptLedgerObservation | null = null;
+  const observations: AttemptLedgerObservation[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const value = JSON.parse(line) as unknown;
-      if (isObservation(value)) latest = Object.freeze(value);
+      if (isObservation(value)) observations.push(Object.freeze(value));
     } catch {
       // The ledger is observational, never authoritative surgery state. A
       // crash may tear its final append; retain the latest complete receipt.
     }
   }
-  return latest;
+  return Object.freeze(observations);
 }
 
 function persistenceSafeReceipt(receipt: AttemptReceipt): AttemptReceipt {
   const url = new URL(receipt.fullUrl);
-  if (!url.search && !url.hash) return receipt;
-  const fullUrl = `${url.origin}${url.pathname}${url.search ? "?<redacted>" : ""}`;
-  return Object.freeze({ ...receipt, fullUrl, urlValuesRedacted: true });
+  const redactedUrl = !!url.search || !!url.hash;
+  const fullUrl = redactedUrl
+    ? `${url.origin}${url.pathname}${url.search ? "?<redacted>" : ""}`
+    : receipt.fullUrl;
+  return Object.freeze({
+    ...receipt,
+    fullUrl,
+    ...(redactedUrl ? { urlValuesRedacted: true } : {}),
+    headerValuesRedacted: true,
+    semanticEnvelope: Object.freeze({
+      safeEntries: Object.freeze(
+        receipt.semanticEnvelope.safeEntries.map((entry) =>
+          Object.freeze({ name: entry.name, value: "<present>" })
+        )
+      ),
+      secretSlots: receipt.semanticEnvelope.secretSlots,
+    }),
+  });
 }
 
 /**
@@ -74,12 +89,17 @@ function persistenceSafeReceipt(receipt: AttemptReceipt): AttemptReceipt {
 export class AttemptLedger {
   readonly path: string;
   #latest: AttemptLedgerObservation | null;
+  readonly #latestByBranch = new Map<string, AttemptLedgerObservation>();
 
   constructor(sessionDirectory: string) {
     mkdirSync(sessionDirectory, { recursive: true, mode: 0o700 });
     chmodSync(sessionDirectory, 0o700);
     this.path = join(sessionDirectory, "attempts.jsonl");
-    this.#latest = loadLatest(this.path);
+    const observations = loadObservations(this.path);
+    this.#latest = observations.at(-1) ?? null;
+    for (const observation of observations) {
+      this.#latestByBranch.set(observation.receipt.branchId, observation);
+    }
     if (existsSync(this.path)) chmodSync(this.path, 0o600);
   }
 
@@ -103,11 +123,12 @@ export class AttemptLedger {
     }
     chmodSync(this.path, 0o600);
     this.#latest = observation;
+    this.#latestByBranch.set(receipt.branchId, observation);
     return observation;
   }
 
-  latest(): AttemptLedgerObservation | null {
-    return this.#latest;
+  latest(branchId?: string): AttemptLedgerObservation | null {
+    return branchId ? this.#latestByBranch.get(branchId) ?? null : this.#latest;
   }
 
   inspection(): Readonly<{ path: string; exists: boolean; mode: string | null }> {

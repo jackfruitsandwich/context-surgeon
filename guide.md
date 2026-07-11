@@ -10,6 +10,7 @@ Run `context-surgeon skeleton` before selecting content. Run `context-surgeon st
 
 ```bash
 context-surgeon skeleton [--json]
+context-surgeon selections
 context-surgeon status
 context-surgeon evict <occurrence-id> [--require-complete]
 context-surgeon replace <occurrence-id> --content "concise reviewed replacement"
@@ -17,6 +18,8 @@ context-surgeon restore <occurrence-id>
 ```
 
 Use occurrence IDs and the session, conversation, branch, and revision returned by the current skeleton. Display aliases are conveniences only; an ambiguous alias must be rejected. For broad selectors, require complete application so protected siblings cannot be presented as a whole-turn eviction.
+
+If more than one branch is observed, run `context-surgeon selections` and explicitly set `CONTEXT_SURGEON_SESSION_ID`, `CONTEXT_SURGEON_CONVERSATION_ID`, and `CONTEXT_SURGEON_BRANCH_ID` before issuing skeleton or mutation commands. Edited earlier turns create a new branch; committed surgery remains on its original sibling branch.
 
 ## Safety model
 

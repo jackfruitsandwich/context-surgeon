@@ -280,20 +280,42 @@ describe("production v2 compiler session seam", () => {
     expect(legacyRecord).not.toHaveBeenCalled();
   });
 
-  it("rejects ambiguous earlier branch history before reading durable state", async () => {
+  it("resolves a uniquely owned prior observation to its original branch", async () => {
     const fixture = seamFixture();
     const current = vi.spyOn(fixture.state, "current");
-    await compile(fixture, responsesBody(["ancestor"]));
+    const ancestor = await compile(fixture, responsesBody(["ancestor"]));
     await compile(fixture, responsesBody(["ancestor", "main"]));
     await compile(fixture, responsesBody(["ancestor", "fork"]));
     expect(fixture.catalog.list(fixture.sessionId)).toHaveLength(2);
-    const readsBeforeAmbiguity = current.mock.calls.length;
+    const readsBeforeReplay = current.mock.calls.length;
 
-    await expect(compile(fixture, responsesBody(["ancestor"]))).rejects.toMatchObject({
-      code: "ambiguous-identity",
-      statusCode: 409,
-    });
-    expect(current).toHaveBeenCalledTimes(readsBeforeAmbiguity);
+    const replay = await compile(fixture, responsesBody(["ancestor"]));
+    expect(replay.artifact.compiled.branchId).toBe(
+      ancestor.artifact.compiled.branchId
+    );
+    expect(current).toHaveBeenCalledTimes(readsBeforeReplay + 1);
+  });
+
+  it("creates a fresh branch for a unique mid-history edit and never applies sibling surgery", async () => {
+    const fixture = seamFixture();
+    const original = await compile(fixture, responsesBody(["one", "two", "three"]));
+    const originalBranch = onlyBranch(fixture);
+    const target = originalBranch.occurrences.find(
+      (occurrence) => occurrence.kind === "user-text"
+    )!;
+    commit(fixture, originalBranch.identity.branchId, [
+      { occurrence: target, action: { kind: "evict" } },
+    ]);
+
+    const edited = await compile(fixture, responsesBody(["one", "edited", "three"]));
+    const branches = fixture.catalog.list(fixture.sessionId);
+    expect(branches).toHaveLength(2);
+    expect(edited.artifact.compiled.branchId).not.toBe(
+      original.artifact.compiled.branchId
+    );
+    expect(edited.artifact.compiled.operationResults).toEqual([]);
+    expect(edited.body.toString("utf8")).toContain('"content":"one"');
+    expect(edited.body.toString("utf8")).not.toContain("[context-surgeon: evicted]");
   });
 
   it("fails closed on a stale expected source hash from the matching snapshot", async () => {

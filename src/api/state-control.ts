@@ -73,6 +73,16 @@ function actionFor(kind: string, action: MutationCommand["action"]): SurgeryActi
   return Object.freeze({ kind: "evict" });
 }
 
+function providerContainerPath(path: readonly (string | number)[]): string {
+  if (
+    (path[0] === "messages" || path[0] === "input") &&
+    typeof path[1] === "number"
+  ) {
+    return JSON.stringify(path.slice(0, 2));
+  }
+  return JSON.stringify(path.slice(0, -1));
+}
+
 function responseError(error: unknown): MutationResponse {
   if (error instanceof AmbiguousConversationError) {
     return { ok: false, code: "ambiguous-identity", error: error.message };
@@ -100,7 +110,7 @@ export class StateControlService {
     private readonly store: StateTransactionStore,
     private readonly catalog: ExplicitConversationCatalog,
     private readonly now: () => Date = () => new Date(),
-    private readonly truthStatus?: () => TruthStatus
+    private readonly truthStatus?: (selection: BranchSelection) => TruthStatus
   ) {}
 
   selections(): readonly BranchSelection[] {
@@ -144,7 +154,7 @@ export class StateControlService {
       revision: state.revision,
       surgeries: Object.freeze(state.surgeries.filter((surgery) => surgery.branchId === selection.branchId)),
       receipts: Object.keys(state.receiptsByOperationId).length,
-      ...(this.truthStatus ? { truth: this.truthStatus() } : {}),
+      ...(this.truthStatus ? { truth: this.truthStatus(selection) } : {}),
     });
   }
 
@@ -212,12 +222,29 @@ export class StateControlService {
       return occurrence;
     });
 
+    const activeOccurrenceIds = new Set(
+      current.surgeries
+        .filter(
+          (surgery) =>
+            surgery.state === "committed" && surgery.branchId === command.branchId
+        )
+        .map((surgery) => surgery.occurrenceId)
+    );
+    const duplicate = targets.find((target) => activeOccurrenceIds.has(target.occurrenceId));
+    if (duplicate) {
+      throw new UnsupportedTargetError(
+        `${duplicate.displayLabel} already has an active surgery; restore it before committing another`
+      );
+    }
+
     if (command.requireComplete) {
-      const selectedPaths = new Set(targets.map((target) => JSON.stringify(target.providerPath.slice(0, -1))));
+      const selectedPaths = new Set(
+        targets.map((target) => providerContainerPath(target.providerPath))
+      );
       const residue = branch.occurrences.filter(
         (occurrence) =>
           !occurrence.mutable &&
-          selectedPaths.has(JSON.stringify(occurrence.providerPath.slice(0, -1)))
+          selectedPaths.has(providerContainerPath(occurrence.providerPath))
       );
       if (residue.length > 0) {
         throw new UnsupportedTargetError(

@@ -97,6 +97,12 @@ const EVICT_OPTION_FLAGS = new Set<string>([
   "--occurrences",
 ]);
 
+const EVICT_BOOLEAN_FLAGS = new Set<string>([
+  "--dry-run",
+  "--require-complete",
+  "--allow-protected-residue",
+]);
+
 function isEvictSelectorFlag(value: string): value is EvictSelectorFlag {
   return EVICT_SELECTOR_FLAGS.has(value);
 }
@@ -227,7 +233,7 @@ export function parseEvictTargetIds(args: string[]): string[] {
       continue;
     }
 
-    if (arg === "--dry-run") {
+    if (EVICT_BOOLEAN_FLAGS.has(arg)) {
       continue;
     }
 
@@ -511,7 +517,7 @@ export function formatSkeletonOutput(result: SkeletonResponse): string {
   return lines.join("\n");
 }
 
-type V2SkeletonOccurrence = {
+export type V2SkeletonOccurrence = {
   occurrenceId: string;
   alias: string;
   kind: string;
@@ -521,7 +527,7 @@ type V2SkeletonOccurrence = {
   activeSurgeryIds: string[];
 };
 
-type V2SkeletonResponse = {
+export type V2SkeletonResponse = {
   selection: BranchSelection;
   revision: number;
   confidence: string;
@@ -555,7 +561,7 @@ async function currentSkeleton(): Promise<V2SkeletonResponse> {
   return get(`/_control/skeleton?${selectionQuery(selection)}`) as Promise<V2SkeletonResponse>;
 }
 
-function exactOccurrenceIds(
+export function exactOccurrenceIds(
   skeleton: V2SkeletonResponse,
   selectors: readonly string[]
 ): string[] {
@@ -568,7 +574,7 @@ function exactOccurrenceIds(
     }
     let matches: V2SkeletonOccurrence[];
     const turn = /^turn (\d+)$/.exec(selector);
-    const kindTurn = /^(assistant message|tool call|tool result) (\d+)$/.exec(selector);
+    const kindTurn = /^(user message|assistant message|tool call|tool result) (\d+)$/.exec(selector);
     if (turn) {
       matches = skeleton.occurrences.filter((item) =>
         new RegExp(`^(?:user message|assistant message|tool call|tool result) ${turn[1]}(?:\\.|$)`).test(item.alias)
@@ -656,6 +662,14 @@ export async function runCommand(args: string[]): Promise<void> {
         console.log(ids.join("\n"));
         break;
       }
+      if (
+        args.includes("--require-complete") &&
+        args.includes("--allow-protected-residue")
+      ) {
+        throw new Error(
+          "--require-complete and --allow-protected-residue are mutually exclusive"
+        );
+      }
       const skeleton = await currentSkeleton();
       let occurrenceIds = exactOccurrenceIds(skeleton, ids);
       if (mediaType) {
@@ -710,7 +724,7 @@ export async function runCommand(args: string[]): Promise<void> {
         skeleton.occurrences.find((item) => item.occurrenceId === occurrenceId)?.activeSurgeryIds ?? []
       );
       if (surgeryIds.length === 0) throw new Error("No active surgery exists for that exact occurrence");
-      const result = await mutateV2(skeleton, occurrenceIds, { kind: "reverse", surgeryIds }, true);
+      const result = await mutateV2(skeleton, [], { kind: "reverse", surgeryIds }, true);
       console.log(`Committed reversal revision ${result.receipt?.committedRevision} (receipt ${result.receipt?.receiptId})`);
       break;
     }

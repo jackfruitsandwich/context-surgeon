@@ -133,8 +133,19 @@ describe("v2 identity", () => {
     const fork = tracker.observe([hash("a"), hash("c")]);
     expect(fork.identity.conversationId).toBe(a.identity.conversationId);
     expect(fork.identity.branchId).not.toBe(main.identity.branchId);
-    expect(tracker.observe([hash("a")]).identity.confidence).toBe("ambiguous");
+    expect(tracker.observe([hash("a")]).identity.branchId).toBe(main.identity.branchId);
     expect(tracker.observe([hash("a"), hash("d")]).identity.confidence).toBe("ambiguous");
+  });
+
+  it("creates a surgery-free fork when one closest lineage has a mid-turn edit", () => {
+    const tracker = new PristineHistoryTracker(hash("session-mid-turn"));
+    const main = tracker.observe([hash("user"), hash("assistant-a"), hash("tool-a")]);
+    const fork = tracker.observe([hash("user"), hash("assistant-b"), hash("tool-b")]);
+    expect(fork.identity).toMatchObject({
+      conversationId: main.identity.conversationId,
+      confidence: "unique-extension",
+    });
+    expect(fork.identity.branchId).not.toBe(main.identity.branchId);
   });
 
   it("recognizes a replay of one uniquely owned historical observation", () => {
@@ -227,6 +238,53 @@ describe("v3 transactional state", () => {
     });
     expect(base.service.mutate(command(base))).toMatchObject({ ok: false, code: "unsupported-target" });
     expect(base.store.current(base.sessionId).revision).toBe(0);
+  });
+
+  it("detects protected sibling blocks at the provider message container", () => {
+    const sessionId = hash(`session-${randomUUID()}`);
+    const branchId = randomUUID();
+    const text = occurrence({
+      sessionId,
+      branchId,
+      path: ["messages", 0, "content", 0, "text"],
+    });
+    const thinking = occurrence({
+      sessionId,
+      branchId,
+      label: "assistant message 1.2",
+      path: ["messages", 0, "content", 1],
+      kind: "reasoning",
+      mutable: false,
+      protectedReason: "signed thinking is protected",
+    });
+    const value = fixture({ occurrences: [text, thinking] });
+    expect(value.service.mutate(command(value))).toMatchObject({
+      ok: false,
+      code: "unsupported-target",
+    });
+    expect(value.store.current(value.sessionId).revision).toBe(0);
+  });
+
+  it("rejects a second active surgery and remains recoverable by surgery-id reversal", () => {
+    const value = fixture();
+    const first = value.service.mutate(command(value));
+    if (!first.ok) throw new Error(first.error);
+    const duplicate = value.service.mutate(command(value, { expectedRevision: 1 }));
+    expect(duplicate).toMatchObject({ ok: false, code: "unsupported-target" });
+    expect(value.store.current(value.sessionId)).toMatchObject({
+      revision: 1,
+      surgeries: [{ state: "committed" }],
+    });
+
+    const restored = value.service.mutate(
+      command(value, {
+        expectedRevision: 1,
+        occurrenceIds: [],
+        action: { kind: "reverse", surgeryIds: first.receipt.surgeryIds },
+      })
+    );
+    expect(restored).toMatchObject({ ok: true, receipt: { committedRevision: 2 } });
+    expect(value.store.current(value.sessionId).surgeries[0].state).toBe("reversed");
   });
 
   it("commits once, publishes once, and returns the original receipt on retry and restart", () => {

@@ -241,23 +241,18 @@ export class PristineHistoryTracker {
 
     const maxCommon = Math.max(...related.map(({ common }) => common));
     const closest = related.filter(({ common }) => common === maxCommon);
-    const ancestorOwners = branches.filter((branch) =>
-      branch.observations.some(
-        (observation) => observation.length === maxCommon && isPrefix(observation, history)
-      )
-    );
-    if (ancestorOwners.length === 1 && closest.length === 1) {
-      const ancestor = ancestorOwners[0];
+    if (closest.length === 1) {
+      const ancestor = closest[0].branch;
       const fork: BranchHistory = {
         conversationId: ancestor.conversationId,
         branchId: randomUUID(),
         history,
-        observations: Object.freeze([...ancestor.observations, history]),
+        observations: Object.freeze([history]),
       };
       this.branches.set(fork.branchId, fork);
       return this.result(fork, confidence);
     }
-    return this.ambiguous("request edits an earlier item or has non-unique lineage");
+    return this.ambiguous("request has non-unique lineage across equally close branches");
   }
 
   all(): readonly HistoryObservation[] {

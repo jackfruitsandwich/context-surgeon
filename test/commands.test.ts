@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatSkeletonOutput,
   formatStatusOutput,
+  exactOccurrenceIds,
   isRetryableControlError,
   normalizeCommandId,
   parseEvictTargetIds,
@@ -69,6 +70,36 @@ describe("normalizeCommandId", () => {
     expect(
       parseEvictTargetIds(["evict", "[assistant", "message", "4.2]"])
     ).toEqual(["assistant message 4.2"]);
+  });
+
+  it("accepts both documented completeness flags without treating them as targets", () => {
+    expect(
+      parseEvictTargetIds([
+        "evict",
+        "occ_123",
+        "--require-complete",
+      ])
+    ).toEqual(["occ_123"]);
+    expect(
+      parseEvictTargetIds([
+        "evict",
+        "occ_123",
+        "--allow-protected-residue",
+      ])
+    ).toEqual(["occ_123"]);
+  });
+
+  it("expands a multi-block user-message selector without alias ambiguity", () => {
+    const skeleton = {
+      selection: { sessionId: "s", conversationId: "c", branchId: "b" },
+      revision: 0,
+      confidence: "unique-extension",
+      occurrences: [
+        { occurrenceId: "one", alias: "user message 1", kind: "user-text", sourceHash: "a", mutable: true, activeSurgeryIds: [] },
+        { occurrenceId: "two", alias: "user message 1", kind: "user-text", sourceHash: "b", mutable: true, activeSurgeryIds: [] },
+      ],
+    };
+    expect(exactOccurrenceIds(skeleton, ["user message 1"])).toEqual(["one", "two"]);
   });
 
   it("rejects unclear mixed positional and selector evictions", () => {

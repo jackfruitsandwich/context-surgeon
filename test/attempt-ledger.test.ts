@@ -68,7 +68,23 @@ describe("attempt ledger", () => {
     const serialized = readFileSync(ledger.path, "utf8");
     expect(serialized).toContain('"bodyLength":123');
     expect(serialized).toContain('"input_tokens":41');
+    expect(serialized).not.toContain("application/json");
+    expect(serialized).toContain('"headerValuesRedacted":true');
     expect(serialized).not.toMatch(/Bearer\s|sk-ant-|prompt text|response text/i);
+  });
+
+  it("tracks the latest observation independently for each branch", () => {
+    const ledger = new AttemptLedger(temp());
+    const first = ledger.record(receipt("response-completed"));
+    const secondReceipt = Object.freeze({
+      ...receipt("response-completed"),
+      attemptId: "attempt-2",
+      branchId: "branch-2",
+    });
+    const second = ledger.record(secondReceipt);
+    expect(ledger.latest()).toEqual(second);
+    expect(ledger.latest("branch-1")).toEqual(first);
+    expect(ledger.latest("branch-2")).toEqual(second);
   });
 
   it("recovers the latest complete observation without treating a torn tail as state corruption", () => {

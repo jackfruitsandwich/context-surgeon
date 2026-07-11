@@ -29,7 +29,7 @@ Silence stays unverified. An observed route or authentication class that does no
 | Client mode | Behavior |
 |---|---|
 | Codex, ChatGPT subscription login | Supported: detected with `codex login status`; Codex keeps its native credential and sends through a dedicated local provider configuration |
-| Codex, API-key login, `OPENAI_API_KEY`, or `CODEX_API_KEY` with `codex exec` | Supported: dedicated Responses provider; an environment key is named, never copied into arguments or logs |
+| Codex, API-key login, `OPENAI_API_KEY`, or `CODEX_API_KEY` with `codex exec` | Implemented and fake-upstream verified: dedicated Responses provider; an environment key is named, never copied into arguments or logs. A real API-key smoke was not available in this release environment |
 | Codex `--profile` | Rejected because the profile can change provider/auth routing |
 | Codex custom `model_provider` or base URL | Rejected; B3 never overwrites a custom backend |
 | Codex `--oss` | Rejected; the local backend is not redirected |
@@ -57,6 +57,8 @@ V2 does **not** persist original prompt/response bodies, content previews, autho
 An existing `~/.context-surgeon/directives.json` is legacy v1 evidence only. V2 never loads it as active authority, never applies it across sessions, and never deletes it automatically. `context-surgeon doctor` reports migration evidence; rebinding requires a new explicit operation against a current v2 occurrence.
 
 Automatic surgery resume across wrapper restarts is deliberately not claimed. Without a client-proven stable session identifier, every launch receives fresh authority. Completed session directories remain as local audit evidence but cannot affect a new launch.
+
+When a uniquely attributable history edits an earlier turn, Context Surgeon creates a new branch and leaves sibling-branch surgeries behind. If two branches are equally plausible, it rejects locally and requires explicit selection. It never guesses by recency or conversation size.
 
 ## Request and usage truth
 

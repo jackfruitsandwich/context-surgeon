@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeGuarantee } from "../src/runtime/guarantee.js";
 import {
   createProductionRuntimeIntegrations,
+  reportedInputTokens,
   type ProductionRuntimeIntegrations,
 } from "../src/runtime/production-integrations.js";
 
@@ -72,6 +73,20 @@ function ping(input: {
 }
 
 describe("production v2 session integrations", () => {
+  it("labels all-null input usage unknown instead of provider-reported zero", () => {
+    expect(reportedInputTokens({
+      uncached_input_tokens: null,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: null,
+      output_tokens: 7,
+    })).toBeNull();
+    expect(reportedInputTokens({
+      uncached_input_tokens: 0,
+      cache_creation_input_tokens: 12,
+      cache_read_input_tokens: 30,
+    })).toBe(42);
+  });
+
   it("provides the control and supported-route integrations as one default-capable unit", () => {
     const value = create({ sessionsDirectory: temp() });
     expect(value.sessionId).toMatch(/^[0-9a-f]{32}$/);

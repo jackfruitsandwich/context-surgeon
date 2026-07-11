@@ -8,6 +8,7 @@ const SECRET_HEADERS = new Map<string, string>([
   ["cookie", "cookie"],
   ["proxy-authorization", "proxy-authorization"],
   ["x-api-key", "api-key"],
+  ["chatgpt-account-id", "account-id"],
 ]);
 
 const SAFE_EXACT = new Set([
@@ -16,7 +17,6 @@ const SAFE_EXACT = new Set([
   "anthropic-beta",
   "anthropic-version",
   "anthropic-dangerous-direct-browser-access",
-  "chatgpt-account-id",
   "openai-beta",
   "origin",
   "referer",

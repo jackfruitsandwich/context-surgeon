@@ -44,6 +44,25 @@ import { AttemptLedger } from "./attempt-ledger.js";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 750;
 
+export function reportedInputTokens(
+  usage: Readonly<Record<string, number | null>> | undefined
+): number | null {
+  if (!usage) return null;
+  if (typeof usage.input_tokens === "number") return usage.input_tokens;
+  if (typeof usage.prompt_tokens === "number") return usage.prompt_tokens;
+  const anthropic = [
+    usage.uncached_input_tokens,
+    usage.cache_creation_input_tokens,
+    usage.cache_read_input_tokens,
+  ];
+  return anthropic.some((value) => typeof value === "number")
+    ? anthropic.reduce<number>(
+        (sum, value) => sum + (typeof value === "number" ? value : 0),
+        0
+      )
+    : null;
+}
+
 export type ProductionV2Session = Readonly<{
   sessionId: string;
   identityResolver: IdentityResolver;
@@ -367,17 +386,11 @@ export function createProductionRuntimeIntegrations(
         ownedState.store,
         catalog,
         undefined,
-        () => {
-          const observation = attemptLedger?.latest() ?? null;
+        (selection) => {
+          const observation = attemptLedger?.latest(selection.branchId) ?? null;
           const receipt = observation?.receipt ?? null;
           const usage = receipt?.usage;
-          const inputTokens = usage
-            ? usage.input_tokens ??
-              usage.prompt_tokens ??
-              ((usage.uncached_input_tokens ?? 0) +
-                (usage.cache_creation_input_tokens ?? 0) +
-                (usage.cache_read_input_tokens ?? 0))
-            : null;
+          const inputTokens = reportedInputTokens(usage);
           const persisted = attemptLedger?.inspection().exists === true && !attemptLedgerError;
           return Object.freeze({
             guarantee: input.guarantee.current(),

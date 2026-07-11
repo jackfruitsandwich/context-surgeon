@@ -126,6 +126,8 @@ export type AttemptReceipt = Readonly<{
   fullUrl: string;
   /** Present only when a persisted observation removed query values. */
   urlValuesRedacted?: boolean;
+  /** Present only when persisted safe-header values were reduced to presence. */
+  headerValuesRedacted?: boolean;
   exactScopeSha256: string;
   bodySha256: string;
   bodyLength: number;
