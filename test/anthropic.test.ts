@@ -327,7 +327,7 @@ describe("Anthropic Claude support", () => {
     expect(applied[0].tokenEstimate).toBe(null);
   });
 
-  it("collapses extra non-tool Claude blocks when a whole message is evicted", async () => {
+  it("preserves Claude block count when a whole message is evicted", async () => {
     const handler = makeHandler();
     const body = {
       model: "claude-sonnet-4-5",
@@ -360,7 +360,11 @@ describe("Anthropic Claude support", () => {
     expect(output.messages[0]?.content).toEqual([
       {
         type: "text",
-        text: expect.stringContaining("[user message 1] [evicted]"),
+        text: "[Context Surgeon: evicted]",
+      },
+      {
+        type: "text",
+        text: "[Context Surgeon: evicted]",
       },
     ]);
   });
@@ -384,13 +388,11 @@ describe("Anthropic Claude support", () => {
       {
         type: "tool_result",
         tool_use_id: "toolu_abc123",
-        content: "[tool result 1.1] const app = express();",
+        content: "const app = express();",
       },
       {
         type: "text",
-        text: expect.stringContaining(
-          "[user message 2] Tool output acknowledged."
-        ),
+        text: "Tool output acknowledged.",
       },
     ]);
   });
@@ -409,7 +411,8 @@ describe("Anthropic Claude support", () => {
 
     expect(result).not.toBeNull();
     expect(result?.upstreamUrl).toBe("https://api.anthropic.com/v1/messages");
-    expect(handler.directiveStore.get(fingerprint)?.lastMatchedAt).not.toBeNull();
+    // Compilation alone is not an upstream outcome and does not mark history applied.
+    expect(handler.directiveStore.get(fingerprint)?.lastMatchedAt).toBeNull();
 
     const output = JSON.parse(result!.body.toString("utf-8")) as {
       messages: Array<{ content: Array<Record<string, unknown>> }>;
@@ -419,15 +422,12 @@ describe("Anthropic Claude support", () => {
     expect(userBlocks[0]).toEqual({
       type: "tool_result",
       tool_use_id: "toolu_abc123",
-      content: "[tool result 1.1] [evicted]",
+      content: "[Context Surgeon: evicted]",
     });
     expect(userBlocks[1]).toMatchObject({
       type: "text",
     });
-    expect((userBlocks[1].text as string)).toContain(
-      "[user message 2] Continue with the next step."
-    );
-    expect((userBlocks[1].text as string)).toContain("[context-surgeon:");
+    expect(userBlocks[1].text).toBe("Continue with the next step.");
   });
 
   it("passes through non-message Anthropic endpoints untouched", async () => {
@@ -499,7 +499,7 @@ describe("Anthropic Claude support", () => {
     expect(Array.isArray(assistantBlocks)).toBe(true);
     expect(assistantBlocks[0]).toMatchObject({
       type: "text",
-      text: "[assistant message 1.1] [evicted]",
+      text: "[Context Surgeon: evicted]",
     });
   });
 
@@ -553,7 +553,7 @@ describe("Anthropic Claude support", () => {
     expect(Array.isArray(assistantBlocks)).toBe(true);
     expect(assistantBlocks[0]).toMatchObject({
       type: "text",
-      text: "[assistant message 1.1] summary kept through title request",
+      text: "summary kept through title request",
     });
   });
 
@@ -599,9 +599,7 @@ describe("Anthropic Claude support", () => {
     expect(typeof firstUser).toBe("string");
     expect(firstUser).toContain("## Test Skill");
     expect(firstUser).toContain("genuin-joging-awkwerd-febuary");
-    expect(firstUser).toContain("[user message 1] ## Test Skill");
     expect(firstUser).toContain("Start over with a clean session");
-    expect(firstUser).toContain("[context-surgeon:");
 
     // And the original conversation still gets its eviction when it returns.
     const back = await transformFixture(handler);
@@ -611,7 +609,7 @@ describe("Anthropic Claude support", () => {
     const assistantBlocks = backOutput.messages[1].content;
     expect(assistantBlocks[0]).toMatchObject({
       type: "text",
-      text: "[assistant message 1.1] [evicted]",
+      text: "[Context Surgeon: evicted]",
     });
   });
 
@@ -667,7 +665,7 @@ describe("Anthropic Claude support", () => {
     expect(output.messages[2]?.content[0]).toEqual({
       type: "tool_result",
       tool_use_id: "toolu_abc123",
-      content: "[tool result 1.1] const app = express();",
+      content: "const app = express();",
     });
     expect(output.messages[2]?.content[1]).toMatchObject({
       type: "text",

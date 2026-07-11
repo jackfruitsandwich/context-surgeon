@@ -219,9 +219,7 @@ describe("transformRequest for chat completions", () => {
     const body = JSON.parse(result!.body.toString("utf-8")) as {
       messages: ChatMessage[];
     };
-    expect(body.messages[3].content).toBe(
-      "[tool result 1.1] const app = express();"
-    );
+    expect(body.messages[3].content).toBe("const app = express();");
   });
 
   it("reroutes Responses-shaped bodies on the chat completions path (Cursor gpt-5.x)", async () => {
@@ -312,13 +310,11 @@ describe("transformRequest for chat completions", () => {
       content: "You are GPT-5.5.\n\nYou operate in Cursor.",
     });
 
-    // user/assistant items got IDs, stayed string-content and typeless
+    // String-content and typeless provider shape is preserved without paid labels.
     expect(parsed.input[1].type).toBeUndefined();
-    expect(parsed.input[1].content).toContain("[user message 1]");
     expect(parsed.input[1].content).toContain("Test Skill"); // skill injected
-    expect(parsed.input[2].content).toContain("[assistant message 1.1]");
-    expect(parsed.input[3].content).toContain("[user message 2]");
-    expect(parsed.input[3].content).toContain("[context-surgeon:"); // status line
+    expect(parsed.input[2].content).toBe("hi, how can I help?");
+    expect(parsed.input[3].content).toBe("evict something");
   });
 
   it("handles base URLs entered without a /v1 suffix", async () => {
@@ -361,7 +357,7 @@ describe("transformRequest for chat completions", () => {
       messages: ChatMessage[];
     };
     expect(body.messages[3].role).toBe("tool");
-    expect(body.messages[3].content).toContain("[evicted]");
+    expect(body.messages[3].content).toBe("[context-surgeon: evicted]");
     expect(body.messages[3].content).not.toContain("const app = express();");
   });
 

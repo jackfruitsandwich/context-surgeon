@@ -168,7 +168,7 @@ describe("Full pipeline", () => {
 
     const toolCall = ctx.items[3];
     if (toolCall.kind === "tool-call") {
-      expect(toolCall.arguments).toBe("{}");
+      expect(toolCall.arguments).toBe('{"path": "src/app.ts"}');
     }
 
     const toolResult = ctx.items[4];
@@ -183,8 +183,8 @@ describe("Full pipeline", () => {
       ]);
     }
 
-    // user 1, assistant 1.1, tool call 1.1, tool result 1.1, assistant 1.2
-    expect(applied).toHaveLength(5);
+    // Tool arguments are protected; the four mutable payload-bearing items apply.
+    expect(applied).toHaveLength(4);
   });
 
   it("replaces a tool result with a summary", () => {
@@ -353,6 +353,7 @@ describe("Full pipeline", () => {
 
     expect(output.input[0]?.content).toEqual([
       { type: "input_text", text: "[evicted]" },
+      { type: "input_text", text: "[image evicted]" },
     ]);
   });
 });

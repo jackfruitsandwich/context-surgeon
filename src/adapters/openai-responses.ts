@@ -68,6 +68,9 @@ function parseMessageContent(
     if (item.type === "input_image") {
       return { type: "image" as const, data: item };
     }
+    if (item.type === "input_file") {
+      return { type: "document" as const, data: item };
+    }
     return { type: "other" as const, raw: item };
   });
 }
@@ -83,6 +86,9 @@ function serializeContentBlock(
     };
   }
   if (block.type === "image") {
+    return block.data as MessageContentItem;
+  }
+  if (block.type === "document") {
     return block.data as MessageContentItem;
   }
   // "other" — return raw

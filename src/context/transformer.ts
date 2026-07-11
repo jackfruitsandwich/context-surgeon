@@ -48,6 +48,37 @@ function replaceMediaBlocks(
   return { content, changed };
 }
 
+function replaceSupportedPayloads(
+  blocks: ContentBlock[],
+  replacement: string,
+  replaceMediaWithContent = false
+): { content: ContentBlock[]; changed: boolean } {
+  let changed = false;
+  const content = blocks.map((block) => {
+    if (block.type === "text") {
+      changed = true;
+      return { type: "text" as const, text: replacement };
+    }
+    if (block.type === "image") {
+      changed = true;
+      return {
+        type: "text" as const,
+        text: replaceMediaWithContent ? replacement : "[image evicted]",
+      };
+    }
+    if (block.type === "document") {
+      changed = true;
+      return {
+        type: "text" as const,
+        text: replaceMediaWithContent ? replacement : "[document evicted]",
+      };
+    }
+    // Reasoning, thinking, opaque, and unknown provider blocks are residue.
+    return block;
+  });
+  return { content, changed };
+}
+
 export type AppliedDirective = {
   fingerprint: string;
   itemId: string;
@@ -116,22 +147,42 @@ export function applyDirectives(
       }
 
       if (item.kind === "user-message" || item.kind === "assistant-message") {
-        item.content = [{ type: "text", text: "[evicted]" }];
+        const replaced = replaceSupportedPayloads(item.content, "[evicted]");
+        if (!replaced.changed) continue;
+        item.content = replaced.content;
       } else if (item.kind === "tool-result") {
-        item.output = "[evicted]";
-      } else if (item.kind === "tool-call") {
-        item.arguments = "{}";
+        if (typeof item.output === "string") {
+          item.output = "[evicted]";
+        } else {
+          const replaced = replaceSupportedPayloads(item.output, "[evicted]");
+          if (!replaced.changed) continue;
+          item.output = replaced.content;
+        }
       } else {
         continue;
       }
       applied.push({ fingerprint, itemId: item.id, tokenEstimate });
     } else if (directive.type === "replace") {
       if (item.kind === "user-message" || item.kind === "assistant-message") {
-        item.content = [{ type: "text", text: directive.content }];
+        const replaced = replaceSupportedPayloads(
+          item.content,
+          directive.content,
+          true
+        );
+        if (!replaced.changed) continue;
+        item.content = replaced.content;
       } else if (item.kind === "tool-result") {
-        item.output = directive.content;
-      } else if (item.kind === "tool-call") {
-        item.arguments = JSON.stringify({ _replaced: directive.content });
+        if (typeof item.output === "string") {
+          item.output = directive.content;
+        } else {
+          const replaced = replaceSupportedPayloads(
+            item.output,
+            directive.content,
+            true
+          );
+          if (!replaced.changed) continue;
+          item.output = replaced.content;
+        }
       } else {
         continue;
       }
