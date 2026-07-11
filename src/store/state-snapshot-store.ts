@@ -104,7 +104,7 @@ function validateReceipt(value: unknown, operationId: string, sessionId: string)
       typeof result.surgeryId === "string" &&
       typeof result.occurrenceId === "string" &&
       typeof result.expectedSourceHash === "string" &&
-      ["committed", "applied", "protected-residue", "unsupported", "stale", "rejected"].includes(String(result.outcome)) &&
+      ["committed", "stale"].includes(String(result.outcome)) &&
       (result.outputHash === undefined || typeof result.outputHash === "string") &&
       (result.reason === undefined || typeof result.reason === "string")
     ) &&

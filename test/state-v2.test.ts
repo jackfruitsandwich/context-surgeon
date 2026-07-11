@@ -327,6 +327,10 @@ describe("v3 transactional state", () => {
         action: { kind: "reverse", surgeryIds: committed.receipt.surgeryIds },
       }));
       expect(reversed).toMatchObject({ ok: true, receipt: { operationResults: [{ reason: sourceState }] } });
+      if (!reversed.ok) throw new Error(reversed.error);
+      expect(reversed.receipt.operationResults[0].outcome).toBe(
+        sourceState === "stale" ? "stale" : "committed"
+      );
       expect(value.store.current(value.sessionId).surgeries).toHaveLength(1);
       expect(value.store.current(value.sessionId).surgeries[0]).toMatchObject({ state: "reversed" });
     }

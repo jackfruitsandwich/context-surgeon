@@ -104,11 +104,12 @@ export async function handleSupportedRoute(
   res: http.ServerResponse,
   config: HandlerConfig,
   debug: boolean
-): Promise<boolean> {
+): Promise<Readonly<{ handled: boolean; attemptId?: string }>> {
   const url = req.url || "";
   const method = req.method || "GET";
-  if (!isSupportedRouteRequest(method, url)) return false;
+  if (!isSupportedRouteRequest(method, url)) return Object.freeze({ handled: false });
 
+  let attemptId: string | undefined;
   try {
     const rawBody = await readRequestBody(req);
     if (debug) {
@@ -131,8 +132,14 @@ export async function handleSupportedRoute(
       onAttemptObservation: config.onAttemptObservation,
     });
     result.recordAttemptOutcome(receipt);
+    if (receipt.state !== "rejected-before-handoff") {
+      attemptId = result.artifact.attemptId;
+    }
   } catch (error) {
     failClosed(res, error, method, url);
   }
-  return true;
+  return Object.freeze({
+    handled: true,
+    ...(attemptId ? { attemptId } : {}),
+  });
 }

@@ -295,7 +295,7 @@ export class StateControlService {
         surgeryId: surgery.surgeryId,
         occurrenceId: supplied?.occurrenceId ?? surgery.occurrenceId,
         expectedSourceHash: surgery.expectedSourceHash,
-        outcome: sourceState === "stale" ? "stale" as const : "applied" as const,
+        outcome: sourceState === "stale" ? "stale" as const : "committed" as const,
         reason: sourceState,
       });
     });

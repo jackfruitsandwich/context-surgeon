@@ -1,7 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ContextObject } from "../context/types.js";
+import { canonicalizeItem } from "../context/fingerprint.js";
 import type { DirectiveStore } from "../store/directive-store.js";
-import type { ConversationTracker } from "./conversations.js";
+import type {
+  ConversationTracker,
+  ExplicitConversationCatalog,
+} from "./conversations.js";
 import type { AttemptReceipt, DispatchArtifact, ProviderKind } from "../contracts/truth.js";
 import type { AttemptObservation } from "./stream.js";
 import type { AppliedDirective } from "../context/transformer.js";
@@ -18,7 +22,12 @@ import {
   type SecretHeaderValues,
 } from "../compiler/index.js";
 import { createDispatchArtifact, type SupportedRoute } from "../contracts/truth.js";
-import type { ResolvedIdentity } from "../contracts/state.js";
+import type {
+  IdentityResolver,
+  ResolvedIdentity,
+  StateSnapshotReader,
+} from "../contracts/state.js";
+import type { ProviderCodec, ProviderProjection } from "../contracts/provider.js";
 import { providerCodec } from "../providers/index.js";
 
 /** Snapshot passed to optional hooks (e.g. tests). */
@@ -42,6 +51,11 @@ export type HandlerConfig = {
   upstreamOpenAI: string;
   upstreamAnthropic: string;
   upstreamChatGPT: string;
+  /** These four fields form one optional production v2 session seam. */
+  sessionId?: string;
+  identityResolver?: IdentityResolver;
+  stateSnapshotReader?: StateSnapshotReader;
+  conversationCatalog?: ExplicitConversationCatalog;
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void;
   onAttemptReceipt?: (receipt: AttemptReceipt) => void;
   onAttemptObservation?: (observation: AttemptObservation) => void;
@@ -62,6 +76,41 @@ export type TransformResult = Readonly<{
 
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
 const sessionIds = new WeakMap<HandlerConfig, string>();
+
+type V2SessionSeam = Readonly<{
+  sessionId: string;
+  identityResolver: IdentityResolver;
+  stateSnapshotReader: StateSnapshotReader;
+  conversationCatalog: ExplicitConversationCatalog;
+}>;
+
+function v2SessionSeam(config: HandlerConfig): V2SessionSeam | null {
+  const configured = [
+    config.sessionId,
+    config.identityResolver,
+    config.stateSnapshotReader,
+    config.conversationCatalog,
+  ];
+  if (configured.every((value) => value === undefined)) return null;
+  if (
+    !config.sessionId ||
+    !config.identityResolver ||
+    !config.stateSnapshotReader ||
+    !config.conversationCatalog
+  ) {
+    throw new TruthCoreError(
+      "The v2 session seam requires sessionId, identityResolver, stateSnapshotReader, and conversationCatalog",
+      500,
+      "v2-session-seam-incomplete"
+    );
+  }
+  return Object.freeze({
+    sessionId: config.sessionId,
+    identityResolver: config.identityResolver,
+    stateSnapshotReader: config.stateSnapshotReader,
+    conversationCatalog: config.conversationCatalog,
+  });
+}
 
 function sessionIdFor(config: HandlerConfig): string {
   const existing = sessionIds.get(config);
@@ -169,6 +218,120 @@ function identityFor(config: HandlerConfig): ResolvedIdentity {
   });
 }
 
+function parseProjection(
+  codec: ProviderCodec,
+  received: Parameters<ProviderCodec["parse"]>[0],
+  identity: ResolvedIdentity
+): ProviderProjection {
+  try {
+    return codec.parse(received, identity);
+  } catch (error) {
+    throw new TruthCoreError(
+      `Provider envelope rejected: ${
+        error instanceof Error ? error.message : "invalid shape"
+      }`,
+      422,
+      "provider-envelope-invalid"
+    );
+  }
+}
+
+function assertPristineProjection(
+  codec: ProviderCodec,
+  received: Parameters<ProviderCodec["parse"]>[0],
+  projection: ProviderProjection
+): void {
+  const validation = codec.validate({
+    before: projection,
+    afterValue: received.providerValue,
+  });
+  if (!validation.valid) {
+    throw new TruthCoreError(
+      `Provider envelope rejected: ${validation.errors.join("; ")}`,
+      422,
+      "provider-envelope-invalid"
+    );
+  }
+}
+
+function pristineItemHashes(projection: ProviderProjection): readonly string[] {
+  return Object.freeze(
+    projection.context.items.map((item) =>
+      createHash("sha256").update(canonicalizeItem(item), "utf8").digest("hex")
+    )
+  );
+}
+
+function pendingIdentity(sessionId: string): ResolvedIdentity {
+  return Object.freeze({
+    sessionId,
+    conversationId: "identity-resolution-pending",
+    branchId: "identity-resolution-pending",
+    revision: 0,
+    confidence: "explicit" as const,
+  });
+}
+
+function resolveV2Projection(input: {
+  seam: V2SessionSeam;
+  codec: ProviderCodec;
+  received: Parameters<ProviderCodec["parse"]>[0];
+}): Readonly<{
+  identity: ResolvedIdentity;
+  projection: ProviderProjection;
+  pristineItemHashes: readonly string[];
+}> {
+  const pristineProjection = parseProjection(
+    input.codec,
+    input.received,
+    pendingIdentity(input.seam.sessionId)
+  );
+  assertPristineProjection(input.codec, input.received, pristineProjection);
+  const history = pristineItemHashes(pristineProjection);
+
+  let identity: ResolvedIdentity;
+  try {
+    identity = input.seam.identityResolver.resolve({
+      pristineItemHashes: history,
+    });
+  } catch (error) {
+    throw new TruthCoreError(
+      `Session identity resolution failed: ${
+        error instanceof Error ? error.message : "invalid identity"
+      }`,
+      409,
+      "identity-resolution-failed"
+    );
+  }
+  if (identity.confidence === "ambiguous") {
+    throw new TruthCoreError(
+      identity.reason ?? "Conversation or branch identity is ambiguous",
+      409,
+      "ambiguous-identity"
+    );
+  }
+  if (
+    identity.sessionId !== input.seam.sessionId ||
+    !identity.conversationId ||
+    !identity.branchId
+  ) {
+    throw new TruthCoreError(
+      "Resolved identity does not match the configured v2 session",
+      409,
+      "identity-session-mismatch"
+    );
+  }
+
+  const projection = parseProjection(input.codec, input.received, identity);
+  input.seam.conversationCatalog.publish({
+    identity,
+    pristineItemHashes: history,
+    occurrences: projection.occurrences,
+    observedAt: new Date().toISOString(),
+  });
+  return Object.freeze({ identity, projection, pristineItemHashes: history });
+}
+
 export async function compileSupportedRequest(
   path: string,
   rawBody: Buffer,
@@ -193,26 +356,32 @@ export async function compileSupportedRequest(
     decodedBytes,
     providerValue,
   });
-  const identity = identityFor(config);
   const codec = providerCodec(classified.route.provider);
+  const seam = v2SessionSeam(config);
+  let identity: ResolvedIdentity;
+  let projection: ProviderProjection;
+  let state;
+  let matchedFingerprints: readonly string[] = Object.freeze([]);
+  let rootFingerprint: string | null = null;
 
-  let projection;
-  try {
-    projection = codec.parse(received, identity);
-  } catch (error) {
-    throw new TruthCoreError(
-      `Provider envelope rejected: ${error instanceof Error ? error.message : "invalid shape"}`,
-      422,
-      "provider-envelope-invalid"
-    );
+  if (seam) {
+    const resolved = resolveV2Projection({ seam, codec, received });
+    identity = resolved.identity;
+    projection = resolved.projection;
+    state = seam.stateSnapshotReader.current(identity.sessionId);
+  } else {
+    identity = identityFor(config);
+    projection = parseProjection(codec, received, identity);
+    rootFingerprint = config.tracker.record(projection.context.items);
+    const bridge = legacyStateForProjection({
+      projection,
+      directiveStore: config.directiveStore,
+      sessionId: identity.sessionId,
+      branchId: identity.branchId,
+    });
+    state = bridge.state;
+    matchedFingerprints = bridge.matchedFingerprints;
   }
-  const rootFingerprint = config.tracker.record(projection.context.items);
-  const bridge = legacyStateForProjection({
-    projection,
-    directiveStore: config.directiveStore,
-    sessionId: identity.sessionId,
-    branchId: identity.branchId,
-  });
   const compiler = new ImmutableRequestCompiler({
     skillBootstrap: config.skillMarkdown,
     skillSignature: SKILL_SIGNATURE,
@@ -220,7 +389,7 @@ export async function compileSupportedRequest(
   const { compiled, exactBody } = compiler.compile({
     received,
     identity,
-    state: bridge.state,
+    state,
     codec,
   });
   const headerMaterial = constructHeaderEnvelope({
@@ -234,7 +403,7 @@ export async function compileSupportedRequest(
     exactBody,
   });
 
-  const applied: AppliedDirective[] = bridge.matchedFingerprints.map((fingerprint) => ({
+  const applied: AppliedDirective[] = matchedFingerprints.map((fingerprint) => ({
     fingerprint,
     itemId:
       projection.context.items.find((item) => item.fingerprint === fingerprint)?.id ?? "?",
@@ -263,14 +432,14 @@ export async function compileSupportedRequest(
       return;
     }
     outcomeRecorded = true;
-    for (const fingerprint of bridge.matchedFingerprints) {
+    for (const fingerprint of matchedFingerprints) {
       const item = projection.context.items.find(
         (candidate) => candidate.fingerprint === fingerprint
       );
       config.directiveStore.noteMatched(fingerprint, item?.id ?? "?", null);
     }
     if (rootFingerprint) {
-      config.tracker.noteApplied(rootFingerprint, [...bridge.matchedFingerprints]);
+      config.tracker.noteApplied(rootFingerprint, [...matchedFingerprints]);
     }
   };
 
