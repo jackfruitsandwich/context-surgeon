@@ -51,11 +51,8 @@ export type HandlerConfig = {
   upstreamOpenAI: string;
   upstreamAnthropic: string;
   upstreamChatGPT: string;
-  /** These four fields form one optional production v2 session seam. */
-  sessionId?: string;
-  identityResolver?: IdentityResolver;
-  stateSnapshotReader?: StateSnapshotReader;
-  conversationCatalog?: ExplicitConversationCatalog;
+  /** Atomic production seam. Its absence alone enables the legacy test bridge. */
+  v2Session?: V2SessionSeam;
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void;
   onAttemptReceipt?: (receipt: AttemptReceipt) => void;
   onAttemptObservation?: (observation: AttemptObservation) => void;
@@ -77,39 +74,31 @@ export type TransformResult = Readonly<{
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
 const sessionIds = new WeakMap<HandlerConfig, string>();
 
-type V2SessionSeam = Readonly<{
+export type V2SessionSeam = Readonly<{
   sessionId: string;
   identityResolver: IdentityResolver;
-  stateSnapshotReader: StateSnapshotReader;
-  conversationCatalog: ExplicitConversationCatalog;
+  store: StateSnapshotReader;
+  catalog: ExplicitConversationCatalog;
 }>;
 
 function v2SessionSeam(config: HandlerConfig): V2SessionSeam | null {
-  const configured = [
-    config.sessionId,
-    config.identityResolver,
-    config.stateSnapshotReader,
-    config.conversationCatalog,
-  ];
-  if (configured.every((value) => value === undefined)) return null;
+  const seam = config.v2Session;
+  if (seam === undefined) return null;
   if (
-    !config.sessionId ||
-    !config.identityResolver ||
-    !config.stateSnapshotReader ||
-    !config.conversationCatalog
+    seam === null ||
+    typeof seam !== "object" ||
+    !seam.sessionId ||
+    !seam.identityResolver ||
+    !seam.store ||
+    !seam.catalog
   ) {
     throw new TruthCoreError(
-      "The v2 session seam requires sessionId, identityResolver, stateSnapshotReader, and conversationCatalog",
+      "HandlerConfig.v2Session requires sessionId, identityResolver, store, and catalog",
       500,
       "v2-session-seam-incomplete"
     );
   }
-  return Object.freeze({
-    sessionId: config.sessionId,
-    identityResolver: config.identityResolver,
-    stateSnapshotReader: config.stateSnapshotReader,
-    conversationCatalog: config.conversationCatalog,
-  });
+  return seam;
 }
 
 function sessionIdFor(config: HandlerConfig): string {
@@ -323,7 +312,7 @@ function resolveV2Projection(input: {
   }
 
   const projection = parseProjection(input.codec, input.received, identity);
-  input.seam.conversationCatalog.publish({
+  input.seam.catalog.publish({
     identity,
     pristineItemHashes: history,
     occurrences: projection.occurrences,
@@ -368,7 +357,7 @@ export async function compileSupportedRequest(
     const resolved = resolveV2Projection({ seam, codec, received });
     identity = resolved.identity;
     projection = resolved.projection;
-    state = seam.stateSnapshotReader.current(identity.sessionId);
+    state = seam.store.current(identity.sessionId);
   } else {
     identity = identityFor(config);
     projection = parseProjection(codec, received, identity);

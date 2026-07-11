@@ -51,10 +51,12 @@ function seamFixture(upstreamBase = "http://127.0.0.1:9"): SeamFixture {
     upstreamOpenAI: `${upstreamBase}/v1`,
     upstreamAnthropic: upstreamBase,
     upstreamChatGPT: `${upstreamBase}/backend-api`,
-    sessionId,
-    identityResolver,
-    stateSnapshotReader: state,
-    conversationCatalog: catalog,
+    v2Session: {
+      sessionId,
+      identityResolver,
+      store: state,
+      catalog,
+    },
   };
   return {
     sessionId,
@@ -197,6 +199,22 @@ function post(input: {
 }
 
 describe("production v2 compiler session seam", () => {
+  it("fails closed on a malformed partial nested seam without using the legacy bridge", async () => {
+    const fixture = seamFixture();
+    const legacyGet = vi.spyOn(fixture.directiveStore, "get");
+    const legacyRecord = vi.spyOn(fixture.tracker, "record");
+    fixture.config.v2Session = {
+      sessionId: fixture.sessionId,
+    } as NonNullable<HandlerConfig["v2Session"]>;
+
+    await expect(compile(fixture, responsesBody(["must not bridge"]))).rejects.toMatchObject({
+      code: "v2-session-seam-incomplete",
+      statusCode: 500,
+    });
+    expect(legacyGet).not.toHaveBeenCalled();
+    expect(legacyRecord).not.toHaveBeenCalled();
+  });
+
   it("validates the pristine provider shape before identity observation", async () => {
     const fixture = seamFixture();
     const resolve = vi.spyOn(fixture.identityResolver, "resolve");
