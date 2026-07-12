@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import type {
+  CacheObservationReceipt,
+  CompiledSentMap,
+  RawProviderUsageReceipt,
+} from "./cache.js";
 
 export type ProviderKind =
   | "openai-responses"
@@ -37,6 +42,8 @@ export type OperationResult = Readonly<{
   outcome: OperationOutcome;
   outputHash?: string;
   reason?: string;
+  attribution?: "user-surgery" | "bootstrap-prefix";
+  sharedProviderPath?: boolean;
 }>;
 
 export type ProviderValidationReceipt = Readonly<{
@@ -55,11 +62,13 @@ export type CompiledRequest = Readonly<{
   branchId: string;
   stateRevision: number;
   receivedSha256: string;
+  decodedSha256: string;
   provider: ProviderKind;
   fullUrl: string;
   normalizedValue: Readonly<Record<string, unknown>>;
   operationResults: readonly OperationResult[];
   validation: ProviderValidationReceipt;
+  sentMap: CompiledSentMap;
   bodyLength: number;
   bodySha256: string;
 }>;
@@ -136,6 +145,8 @@ export type AttemptReceipt = Readonly<{
   responseStatus?: number;
   abortSource?: "client" | "upstream" | "unknown";
   usage?: Readonly<Record<string, number | null>>;
+  providerUsageRaw?: RawProviderUsageReceipt;
+  cacheObservation?: CacheObservationReceipt;
   usagePartialStream?: boolean;
   error?: string;
 }>;

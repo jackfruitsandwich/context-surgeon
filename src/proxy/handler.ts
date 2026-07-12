@@ -25,10 +25,12 @@ import { createDispatchArtifact, type SupportedRoute } from "../contracts/truth.
 import type {
   IdentityResolver,
   ResolvedIdentity,
-  StateSnapshotReader,
+  StateSnapshot,
+  StateTransactionStore,
 } from "../contracts/state.js";
 import type { ProviderCodec, ProviderProjection } from "../contracts/provider.js";
 import { providerCodec } from "../providers/index.js";
+import { reconcileBootstrapState } from "../compiler/bootstrap-state.js";
 
 /** Snapshot passed to optional hooks (e.g. tests). */
 export type DebugSnapshotInput = {
@@ -56,6 +58,7 @@ export type HandlerConfig = {
   onDebugSnapshot?: (snapshot: DebugSnapshotInput) => void;
   onAttemptReceipt?: (receipt: AttemptReceipt) => void;
   onAttemptObservation?: (observation: AttemptObservation) => void;
+  cacheHmacSecret?: Uint8Array;
 };
 
 export type TransformResult = Readonly<{
@@ -73,12 +76,14 @@ export type TransformResult = Readonly<{
 
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
 const sessionIds = new WeakMap<HandlerConfig, string>();
+const legacyBootstrapStates = new WeakMap<HandlerConfig, StateSnapshot>();
 
 export type V2SessionSeam = Readonly<{
   sessionId: string;
   identityResolver: IdentityResolver;
-  store: StateSnapshotReader;
+  store: StateTransactionStore;
   catalog: ExplicitConversationCatalog;
+  cacheHmacSecret?: Uint8Array;
 }>;
 
 function v2SessionSeam(config: HandlerConfig): V2SessionSeam | null {
@@ -357,7 +362,18 @@ export async function compileSupportedRequest(
     const resolved = resolveV2Projection({ seam, codec, received });
     identity = resolved.identity;
     projection = resolved.projection;
-    state = seam.store.current(identity.sessionId);
+    const history = resolved.pristineItemHashes;
+    state = config.skillMarkdown
+      ? reconcileBootstrapState({
+          store: seam.store,
+          identity,
+          projection,
+          receivedValue: received.providerValue,
+          pristineItemHashes: history,
+          skillSignature: SKILL_SIGNATURE,
+          skillBootstrap: config.skillMarkdown,
+        }).state
+      : seam.store.current(identity.sessionId);
   } else {
     identity = identityFor(config);
     projection = parseProjection(codec, received, identity);
@@ -369,11 +385,36 @@ export async function compileSupportedRequest(
       branchId: identity.branchId,
     });
     state = bridge.state;
+    if (config.skillMarkdown) {
+      let memory = legacyBootstrapStates.get(config) ?? bridge.state;
+      memory = Object.freeze({ ...memory, surgeries: bridge.state.surgeries });
+      const memoryStore: StateTransactionStore = {
+        current(sessionId) {
+          if (sessionId !== identity.sessionId) throw new Error("Legacy state session mismatch");
+          return memory;
+        },
+        commit(transaction) {
+          memory = transaction.next;
+          legacyBootstrapStates.set(config, memory);
+          return transaction.receipt;
+        },
+      };
+      state = reconcileBootstrapState({
+        store: memoryStore,
+        identity,
+        projection,
+        receivedValue: received.providerValue,
+        pristineItemHashes: pristineItemHashes(projection),
+        skillSignature: SKILL_SIGNATURE,
+        skillBootstrap: config.skillMarkdown,
+      }).state;
+    }
     matchedFingerprints = bridge.matchedFingerprints;
   }
   const compiler = new ImmutableRequestCompiler({
     skillBootstrap: config.skillMarkdown,
     skillSignature: SKILL_SIGNATURE,
+    cacheHmacSecret: seam?.cacheHmacSecret ?? config.cacheHmacSecret,
   });
   const { compiled, exactBody } = compiler.compile({
     received,

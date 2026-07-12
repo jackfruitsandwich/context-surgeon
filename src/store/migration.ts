@@ -224,7 +224,7 @@ export type DoctorReport = Readonly<{
   ownershipLiveness?: "live" | "no-listener" | "wedged" | "wrong-identity" | "unknown";
   guaranteeInputs: Readonly<{
     controlRecordPresent: boolean;
-    stateVersion3: boolean;
+    stateVersion4: boolean;
     restrictivePermissions: boolean;
   }>;
 }>;
@@ -279,7 +279,7 @@ export function doctorSession(input: {
     ownership,
     guaranteeInputs: Object.freeze({
       controlRecordPresent: control.exists && control.validJson === true,
-      stateVersion3: state.version === 3 && state.validJson === true,
+      stateVersion4: state.version === 4 && state.validJson === true,
       restrictivePermissions,
     }),
   });

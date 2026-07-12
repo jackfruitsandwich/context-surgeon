@@ -244,6 +244,10 @@ describe("supported-route exact dispatch", () => {
           id: `resp_${responseNumber}`,
           usage: {
             input_tokens: 100 + responseNumber,
+            input_tokens_details: {
+              cached_tokens: responseNumber,
+              cache_write_tokens: responseNumber + 10,
+            },
             output_tokens: 3,
             total_tokens: 103 + responseNumber,
           },
@@ -278,6 +282,14 @@ describe("supported-route exact dispatch", () => {
       expect(completed[0].bodySha256).toBe(completed[1].bodySha256);
       expect(completed[0].usage?.input_tokens).toBe(101);
       expect(completed[1].usage?.input_tokens).toBe(102);
+      expect(completed[0].usage?.cache_write_input_tokens).toBe(11);
+      expect(completed[1].providerUsageRaw).toMatchObject({
+        mergeVersion: "provider-usage-v1",
+        state: "complete",
+        merged: {
+          input_tokens_details: { cached_tokens: 2, cache_write_tokens: 12 },
+        },
+      });
       expect(completed.every((receipt) => receipt.connected)).toBe(true);
 
       for (const receipt of completed) {
@@ -296,6 +308,23 @@ describe("supported-route exact dispatch", () => {
         );
         expect(receipt.bodySha256).toBe(
           createHash("sha256").update(body).digest("hex")
+        );
+        expect(receipt.cacheObservation).toMatchObject({
+          attemptId: receipt.attemptId,
+          bodyTruth: {
+            receivedSha256: receipt.bodySha256,
+            decodedSha256: receipt.bodySha256,
+            compiledSha256: receipt.bodySha256,
+            dispatchedSha256: receipt.bodySha256,
+          },
+          observed: "provider-reported-read-and-write",
+          sentMap: {
+            exactBodySha256: receipt.bodySha256,
+            canonicalization: "json-insertion-v1",
+          },
+        });
+        expect(receipt.cacheObservation?.explanationCodes).toContain(
+          "provider-cache-residency-not-claimed"
         );
         const serializedReceipt = JSON.stringify(receipt);
         expect(serializedReceipt).not.toContain("lifecycle-secret");
@@ -340,6 +369,8 @@ describe("supported-route exact dispatch", () => {
       expect(final.abortSource).toBe("upstream");
       expect(final.usagePartialStream).toBe(true);
       expect(final.usage?.input_tokens).toBe(77);
+      expect(final.providerUsageRaw?.state).toBe("partial");
+      expect(final.cacheObservation?.bodyTruth.compiledSha256).toBe(final.bodySha256);
     } finally {
       await server.close();
       await upstream.close();

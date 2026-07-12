@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { compileSentMap } from "../cache/sent-map.js";
 import type { ProviderCodec, RequestCompiler } from "../contracts/provider.js";
 import type { Occurrence, StateSnapshot, SurgeryRecord } from "../contracts/state.js";
 import {
@@ -33,6 +35,8 @@ type MutableOperationResult = {
   outcome: OperationResult["outcome"];
   outputHash?: string;
   reason?: string;
+  attribution?: OperationResult["attribution"];
+  sharedProviderPath?: boolean;
 };
 
 type AppliedPath = {
@@ -40,13 +44,6 @@ type AppliedPath = {
   value: unknown;
   resultIndices: number[];
 };
-
-function containsText(value: unknown, needle: string): boolean {
-  if (typeof value === "string") return value.includes(needle);
-  if (Array.isArray(value)) return value.some((entry) => containsText(entry, needle));
-  if (isRecord(value)) return Object.values(value).some((entry) => containsText(entry, needle));
-  return false;
-}
 
 function normalizeCursorResponses(
   received: ReceivedRequest,
@@ -138,6 +135,8 @@ function freezeResults(results: readonly MutableOperationResult[]): readonly Ope
         outcome: result.outcome,
         ...(result.outputHash ? { outputHash: result.outputHash } : {}),
         ...(result.reason ? { reason: result.reason } : {}),
+        ...(result.attribution ? { attribution: result.attribution } : {}),
+        ...(result.sharedProviderPath ? { sharedProviderPath: true } : {}),
       })
     )
   );
@@ -146,15 +145,18 @@ function freezeResults(results: readonly MutableOperationResult[]): readonly Ope
 export type ImmutableRequestCompilerOptions = Readonly<{
   skillBootstrap?: string;
   skillSignature?: string;
+  cacheHmacSecret?: Uint8Array;
 }>;
 
 export class ImmutableRequestCompiler implements RequestCompiler {
   private readonly skillBootstrap: string;
-  private readonly skillSignature: string;
+  private readonly cacheHmacSecret: Uint8Array;
 
   constructor(options: ImmutableRequestCompilerOptions = {}) {
     this.skillBootstrap = options.skillBootstrap?.trim() ?? "";
-    this.skillSignature = options.skillSignature?.trim() ?? "";
+    this.cacheHmacSecret = new Uint8Array(
+      options.cacheHmacSecret ?? randomBytes(32)
+    );
   }
 
   compile(input: {
@@ -212,6 +214,7 @@ export class ImmutableRequestCompiler implements RequestCompiler {
         occurrenceId: surgery.occurrenceId,
         expectedSourceHash: surgery.expectedSourceHash,
         outcome: "rejected",
+        attribution: "user-surgery",
       };
       if (!occurrence) {
         results.push({ ...base, outcome: "stale", reason: "Occurrence is absent" });
@@ -278,43 +281,156 @@ export class ImmutableRequestCompiler implements RequestCompiler {
       }
     }
 
-    if (
-      this.skillBootstrap &&
-      (!this.skillSignature || !containsText(candidate, this.skillSignature))
-    ) {
-      const firstUserText = before.occurrences.find(
-        (occurrence) => occurrence.kind === "user-text" && occurrence.mutable
+    if (this.skillBootstrap) {
+      const branch = input.state.bootstrapBranches.find(
+        (candidateBranch) => candidateBranch.branchId === input.identity.branchId
       );
-      if (firstUserText) {
-        const existing = getAtPath(candidate, firstUserText.providerPath);
-        if (typeof existing === "string") {
-          const injected = `${this.skillBootstrap}\n\n${existing}`;
-          if (setAtPath(candidate, firstUserText.providerPath, injected)) {
-            const key = pathKey(firstUserText.providerPath);
+      if (!branch) {
+        throw new TruthCoreError(
+          "Committed bootstrap state is absent for the resolved branch",
+          409,
+          "bootstrap-state-missing",
+          freezeResults(results)
+        );
+      }
+      if (branch.status === "anchored" && branch.anchor) {
+        const exactAnchor = before.occurrences.find(
+          (occurrence) =>
+            occurrence.occurrenceId === branch.anchor?.occurrenceId &&
+            occurrence.sourceHash === branch.anchor.sourceHash &&
+            pathKey(occurrence.providerPath) === pathKey(branch.anchor.providerPath)
+        );
+        const bootstrapPrefix = `${this.skillBootstrap}\n\n`;
+        const anchored =
+          exactAnchor ??
+          before.occurrences.find((occurrence) => {
+            if (
+              pathKey(occurrence.providerPath) !== pathKey(branch.anchor!.providerPath)
+            ) return false;
+            const value = getAtPath(candidate, occurrence.providerPath);
+            return (
+              typeof value === "string" &&
+              value.startsWith(bootstrapPrefix) &&
+              sha256Value(value.slice(bootstrapPrefix.length)) ===
+                branch.anchor!.sourceHash
+            );
+          });
+        if (!anchored) {
+          throw new TruthCoreError(
+            "Committed bootstrap anchor was not reconciled before compilation",
+            409,
+            "bootstrap-anchor-unreconciled",
+            freezeResults(results)
+          );
+        }
+        const existing = getAtPath(candidate, anchored.providerPath);
+        if (typeof existing !== "string") {
+          throw new TruthCoreError(
+            "Bootstrap anchor no longer addresses provider text",
+            409,
+            "bootstrap-anchor-not-text",
+            freezeResults(results)
+          );
+        }
+        const key = pathKey(anchored.providerPath);
+        const prior = appliedPaths.get(key);
+        if (branch.decision === "inject") {
+          if (
+            !prior &&
+            existing.startsWith(bootstrapPrefix) &&
+            sha256Value(existing.slice(bootstrapPrefix.length)) ===
+              branch.anchor.sourceHash
+          ) {
+            results.push({
+              surgeryId: "compiler-bootstrap",
+              occurrenceId: branch.anchor.occurrenceId,
+              expectedSourceHash: branch.anchor.sourceHash,
+              outcome: "applied",
+              outputHash: sha256Value(existing),
+              reason: "bootstrap-exact-prefix-already-at-committed-anchor",
+              attribution: "bootstrap-prefix",
+            });
+          } else {
+            const injected = `${bootstrapPrefix}${existing}`;
+            if (!setAtPath(candidate, anchored.providerPath, injected)) {
+              throw new TruthCoreError(
+                "Bootstrap anchor provider path is absent",
+                409,
+                "bootstrap-anchor-path-absent",
+                freezeResults(results)
+              );
+            }
             const resultIndex = results.length;
             results.push({
               surgeryId: "compiler-bootstrap",
-              occurrenceId: firstUserText.occurrenceId,
-              expectedSourceHash: firstUserText.sourceHash,
+              occurrenceId: anchored.occurrenceId,
+              expectedSourceHash: anchored.sourceHash,
               outcome: "applied",
               outputHash: sha256Value(injected),
+              reason: prior
+                ? "bootstrap-applied-after-user-surgery-same-path"
+                : "bootstrap-applied-at-committed-anchor",
+              attribution: "bootstrap-prefix",
+              sharedProviderPath: !!prior,
             });
-            const prior = appliedPaths.get(key);
             if (prior) {
               prior.value = injected;
               prior.resultIndices.push(resultIndex);
               for (const priorIndex of prior.resultIndices) {
                 results[priorIndex].outputHash = sha256Value(injected);
+                results[priorIndex].sharedProviderPath = true;
+                if (results[priorIndex].attribution === "user-surgery") {
+                  results[priorIndex].reason =
+                    "user-surgery-composed-before-bootstrap-same-path";
+                }
               }
             } else {
               appliedPaths.set(key, {
-                path: firstUserText.providerPath,
+                path: anchored.providerPath,
                 value: injected,
                 resultIndices: [resultIndex],
               });
             }
           }
+        } else if (branch.decision === "preserve") {
+          if (prior) {
+            for (const priorIndex of prior.resultIndices) {
+              results[priorIndex].sharedProviderPath = true;
+              if (results[priorIndex].attribution === "user-surgery") {
+                results[priorIndex].reason =
+                  "user-surgery-shares-bootstrap-preserve-path";
+              }
+            }
+          }
+          results.push({
+            surgeryId: "compiler-bootstrap",
+            occurrenceId: anchored.occurrenceId,
+            expectedSourceHash: anchored.sourceHash,
+            outcome: "applied",
+            outputHash: sha256Value(existing),
+            reason: prior
+              ? "bootstrap-preserve-decision-shares-user-surgery-path"
+              : "bootstrap-preserved-at-committed-anchor",
+            attribution: "bootstrap-prefix",
+            sharedProviderPath: !!prior,
+          });
+        } else {
+          throw new TruthCoreError(
+            "Anchored bootstrap state has no committed decision",
+            409,
+            "bootstrap-decision-pending",
+            freezeResults(results)
+          );
         }
+      } else if (branch.status === "stopped") {
+        results.push({
+          surgeryId: "compiler-bootstrap",
+          occurrenceId: "bootstrap-anchor-lost",
+          expectedSourceHash: "0".repeat(64),
+          outcome: "protected-residue",
+          reason: "bootstrap-anchor-loss-stopped-visible",
+          attribution: "bootstrap-prefix",
+        });
       }
     }
 
@@ -371,6 +487,14 @@ export class ImmutableRequestCompiler implements RequestCompiler {
     }
 
     const exactBody = ExactBody.fromUtf8(serialized);
+    const sentMap = compileSentMap({
+      provider: input.codec.provider,
+      receivedBody: input.received.providerValue as JsonRecord,
+      finalBody: reparsed,
+      exactBodySha256: exactBody.sha256,
+      occurrences: before.occurrences,
+      secret: this.cacheHmacSecret,
+    });
     const operationResults = freezeResults(results);
     const compiled: CompiledRequest = Object.freeze({
       requestId: input.received.requestId,
@@ -378,11 +502,13 @@ export class ImmutableRequestCompiler implements RequestCompiler {
       branchId: input.identity.branchId,
       stateRevision: input.state.revision,
       receivedSha256: input.received.receivedSha256,
+      decodedSha256: input.received.decodedSha256,
       provider: input.codec.provider,
       fullUrl: input.received.route.upstreamUrl,
       normalizedValue: deepFreeze(reparsed),
       operationResults,
       validation,
+      sentMap,
       bodyLength: exactBody.length,
       bodySha256: exactBody.sha256,
     });

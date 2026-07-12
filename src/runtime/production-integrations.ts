@@ -41,6 +41,7 @@ import type {
   ControlPlaneHandle,
 } from "./control-listener.js";
 import { AttemptLedger } from "./attempt-ledger.js";
+import { loadOrCreateCacheHmacSecret } from "../cache/key-store.js";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 750;
 
@@ -68,6 +69,7 @@ export type ProductionV2Session = Readonly<{
   identityResolver: IdentityResolver;
   store: OwnedSessionState["store"];
   catalog: ExplicitConversationCatalog;
+  cacheHmacSecret: Uint8Array;
 }>;
 
 type ProductionHandlerConfig = HandlerConfig & Readonly<{
@@ -95,6 +97,10 @@ class LaunchIdentityResolver implements IdentityResolver {
 
   constructor(readonly sessionId: string) {
     this.histories = new PristineHistoryTracker(sessionId);
+  }
+
+  restore(branches: Parameters<PristineHistoryTracker["restore"]>[0]): void {
+    this.histories.restore(branches);
   }
 
   resolve(input: {
@@ -338,6 +344,13 @@ export function createProductionRuntimeIntegrations(
         sessionDirectory,
         ownershipLock,
       });
+      identityResolver.restore(
+        ownedState.store.current(sessionId).bootstrapBranches
+      );
+      const cacheHmacSecret = loadOrCreateCacheHmacSecret(sessionDirectory, {
+        allowCreate:
+          ownedState.store.current(sessionId).bootstrapBranches.length === 0,
+      });
 
       const socketProbe = await probeUnixControl({
         controlAddress: socketPath,
@@ -370,6 +383,7 @@ export function createProductionRuntimeIntegrations(
         identityResolver,
         store: ownedState.store,
         catalog,
+        cacheHmacSecret,
       });
       attemptLedger = new AttemptLedger(sessionDirectory);
       const identity: ControlIdentity = Object.freeze({

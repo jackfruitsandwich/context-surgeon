@@ -11,7 +11,7 @@ export type DirectiveEntry = {
   directive: Directive;
   /** Last known ordinal label (display only in the retired v1 UI). */
   humanId: string;
-  /** Memory-only compatibility preview; v3 never persists it. */
+  /** Memory-only compatibility preview; v4 never persists it. */
   preview: string;
   tokenEstimate: number | null;
   createdAt: number;
@@ -33,7 +33,7 @@ export class DirectiveStore {
 
   set(fingerprint: string, entry: DirectiveEntry): void {
     if (this.persistedV1Disabled) {
-      throw new Error("Persisted v1 directives are disabled; use a v3 session transaction");
+      throw new Error("Persisted v1 directives are disabled; use a v4 session transaction");
     }
     this.entries.set(fingerprint, entry);
   }
@@ -48,7 +48,7 @@ export class DirectiveStore {
 
   delete(fingerprint: string): boolean {
     if (this.persistedV1Disabled) {
-      throw new Error("Persisted v1 directives are disabled; use a v3 reversal transaction");
+      throw new Error("Persisted v1 directives are disabled; use a v4 reversal transaction");
     }
     return this.entries.delete(fingerprint);
   }

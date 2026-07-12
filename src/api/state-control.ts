@@ -61,6 +61,7 @@ function freezeSnapshot(snapshot: StateSnapshot): StateSnapshot {
   return Object.freeze({
     ...snapshot,
     surgeries: Object.freeze([...snapshot.surgeries]),
+    bootstrapBranches: Object.freeze([...snapshot.bootstrapBranches]),
     receiptsByOperationId: Object.freeze({ ...snapshot.receiptsByOperationId }),
   });
 }
@@ -367,10 +368,11 @@ export class StateControlService {
       committedAt,
     });
     const next = freezeSnapshot({
-      version: 3,
+      version: 4,
       sessionId: current.sessionId,
       revision: current.revision + 1,
       surgeries: Object.freeze([...surgeries]),
+      bootstrapBranches: current.bootstrapBranches,
       receiptsByOperationId: Object.freeze({
         ...current.receiptsByOperationId,
         [command.operationId]: receipt,

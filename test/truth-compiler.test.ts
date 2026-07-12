@@ -49,7 +49,7 @@ function stateFor(
 ): StateSnapshot {
   const projection = codec.parse(request, identity);
   return Object.freeze({
-    version: 3,
+    version: 4,
     sessionId: identity.sessionId,
     revision: identity.revision,
     surgeries: Object.freeze(
@@ -69,16 +69,18 @@ function stateFor(
         });
       })
     ),
+    bootstrapBranches: Object.freeze([]),
     receiptsByOperationId: Object.freeze({}),
   });
 }
 
 function emptyState(): StateSnapshot {
   return Object.freeze({
-    version: 3,
+    version: 4,
     sessionId: identity.sessionId,
     revision: identity.revision,
     surgeries: Object.freeze([]),
+    bootstrapBranches: Object.freeze([]),
     receiptsByOperationId: Object.freeze({}),
   });
 }

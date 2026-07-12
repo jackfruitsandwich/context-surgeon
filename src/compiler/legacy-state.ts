@@ -64,10 +64,11 @@ export function legacyStateForProjection(input: {
 
   return Object.freeze({
     state: Object.freeze({
-      version: 3 as const,
+      version: 4 as const,
       sessionId: input.sessionId,
       revision: 0,
       surgeries: Object.freeze(surgeries),
+      bootstrapBranches: Object.freeze([]),
       receiptsByOperationId: Object.freeze({}),
     }),
     matchedFingerprints: Object.freeze([...matched]),

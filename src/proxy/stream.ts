@@ -7,6 +7,13 @@ import type {
   AttemptState,
   DispatchArtifact,
 } from "../contracts/truth.js";
+import type {
+  CacheObservationReceipt,
+  FrozenJsonValue,
+  ProviderCacheObservation,
+  RawProviderUsageReceipt,
+} from "../contracts/cache.js";
+import { CACHE_TRUTH_SCHEMA_VERSION } from "../contracts/cache.js";
 import {
   materializeHeaders,
   type SecretHeaderValues,
@@ -15,6 +22,7 @@ import {
   createUsageTap,
   type ProviderFormat,
   type ProviderUsage,
+  type UsageTap,
 } from "./usage.js";
 import { ResponsesToChatTranslator } from "./responses-to-chat.js";
 
@@ -74,6 +82,81 @@ function responseHeaders(
   return output;
 }
 
+function hasNestedNumber(
+  value: FrozenJsonValue,
+  paths: readonly (readonly string[])[]
+): boolean {
+  return paths.some((path) => {
+    let current: FrozenJsonValue | undefined = value;
+    for (const part of path) {
+      if (
+        current === null ||
+        typeof current !== "object" ||
+        Array.isArray(current)
+      ) return false;
+      current = (current as { readonly [key: string]: FrozenJsonValue })[part];
+    }
+    return typeof current === "number";
+  });
+}
+
+function cacheObservation(
+  artifact: DispatchArtifact,
+  state: AttemptState,
+  usage: ProviderUsage | undefined,
+  raw: RawProviderUsageReceipt | undefined
+): CacheObservationReceipt {
+  const read = usage?.cached_input_tokens ?? usage?.cache_read_input_tokens;
+  const write = usage?.cache_write_input_tokens ?? usage?.cache_creation_input_tokens;
+  let observed: ProviderCacheObservation;
+  if (
+    state === "failed-no-connection" ||
+    state === "failed-after-connection-delivery-unknown"
+  ) {
+    observed = raw ? "usage-unavailable" : "request-failed";
+  } else if ((read ?? 0) > 0 && (write ?? 0) > 0) {
+    observed = "provider-reported-read-and-write";
+  } else if ((read ?? 0) > 0) {
+    observed = "provider-reported-read";
+  } else if ((write ?? 0) > 0) {
+    observed = "provider-reported-write";
+  } else if (state !== "response-aborted" &&
+    raw &&
+    hasNestedNumber(raw.merged, [
+      ["cache_read_input_tokens"],
+      ["cache_creation_input_tokens"],
+      ["cache_write_tokens"],
+      ["input_tokens_details", "cached_tokens"],
+      ["input_tokens_details", "cache_write_tokens"],
+      ["prompt_tokens_details", "cached_tokens"],
+      ["prompt_tokens_details", "cache_write_tokens"],
+    ])
+  ) {
+    observed = "provider-reported-zero";
+  } else {
+    observed = "usage-unavailable";
+  }
+  return Object.freeze({
+    schemaVersion: CACHE_TRUTH_SCHEMA_VERSION,
+    attemptId: artifact.attemptId,
+    bodyTruth: Object.freeze({
+      receivedSha256: artifact.compiled.receivedSha256,
+      decodedSha256: artifact.compiled.decodedSha256,
+      compiledSha256: artifact.compiled.bodySha256,
+      dispatchedSha256: artifact.bodySha256,
+    }),
+    sentMap: artifact.compiled.sentMap,
+    ...(raw ? { providerUsageRaw: raw } : {}),
+    observed,
+    explanationCodes: Object.freeze([
+      "received-compiled-dispatched-body-truth",
+      "provider-usage-reported-not-wire-observed",
+      "provider-cache-identity-not-claimed",
+      "provider-cache-residency-not-claimed",
+    ]),
+  });
+}
+
 export function dispatchArtifact(
   artifact: DispatchArtifact,
   clientRes: http.ServerResponse,
@@ -84,6 +167,7 @@ export function dispatchArtifact(
     let connected = false;
     let responseStatus: number | undefined;
     let usage: ProviderUsage | undefined;
+    let providerUsageRaw: RawProviderUsageReceipt | undefined;
     let usagePartialStream = false;
     let abortSource: AttemptReceipt["abortSource"];
     let errorMessage: string | undefined;
@@ -91,6 +175,7 @@ export function dispatchArtifact(
     let responseStarted = false;
     let upstreamReq: http.ClientRequest | undefined;
     let upstreamRes: http.IncomingMessage | undefined;
+    let usageTap: UsageTap | null = null;
 
     const snapshot = (): AttemptReceipt =>
       Object.freeze({
@@ -111,6 +196,10 @@ export function dispatchArtifact(
         ...(responseStatus !== undefined ? { responseStatus } : {}),
         ...(abortSource ? { abortSource } : {}),
         ...(usage ? { usage } : {}),
+        ...(providerUsageRaw ? { providerUsageRaw } : {}),
+        ...(state !== "compiled" && state !== "rejected-before-handoff"
+          ? { cacheObservation: cacheObservation(artifact, state, usage, providerUsageRaw) }
+          : {}),
         ...(usagePartialStream ? { usagePartialStream: true } : {}),
         ...(errorMessage ? { error: errorMessage } : {}),
       });
@@ -181,7 +270,7 @@ export function dispatchArtifact(
           responseStarted = true;
           responseStatus = response.statusCode || 502;
           emit("response-started");
-          const usageTap = createUsageTap(
+          usageTap = createUsageTap(
             options.format,
             response.headers,
             undefined,
@@ -215,7 +304,8 @@ export function dispatchArtifact(
             errorMessage = error?.message;
             usageTap?.onAborted();
             usage = usageTap?.latestUsage() ?? usage;
-            usagePartialStream = usage !== undefined;
+            providerUsageRaw = usageTap?.latestRawUsage() ?? providerUsageRaw;
+            usagePartialStream = usage !== undefined || providerUsageRaw !== undefined;
             if (!clientRes.writableEnded) clientRes.end();
             finish("response-aborted");
           };
@@ -226,6 +316,7 @@ export function dispatchArtifact(
             if (settled) return;
             usageTap?.onEnd();
             usage = usageTap?.latestUsage() ?? usage;
+            providerUsageRaw = usageTap?.latestRawUsage() ?? providerUsageRaw;
             if (!clientRes.writableEnded) clientRes.end();
             finish("response-completed");
           });
@@ -263,7 +354,10 @@ export function dispatchArtifact(
       errorMessage = error.message;
       if (responseStarted) {
         abortSource = "upstream";
-        usagePartialStream = usage !== undefined;
+        usageTap?.onAborted();
+        usage = usageTap?.latestUsage() ?? usage;
+        providerUsageRaw = usageTap?.latestRawUsage() ?? providerUsageRaw;
+        usagePartialStream = usage !== undefined || providerUsageRaw !== undefined;
         if (!clientRes.writableEnded) clientRes.end();
         finish("response-aborted");
         return;
@@ -285,7 +379,10 @@ export function dispatchArtifact(
       if (settled || clientRes.writableEnded) return;
       abortSource = "client";
       if (responseStarted) {
-        usagePartialStream = usage !== undefined;
+        usageTap?.onAborted();
+        usage = usageTap?.latestUsage() ?? usage;
+        providerUsageRaw = usageTap?.latestRawUsage() ?? providerUsageRaw;
+        usagePartialStream = usage !== undefined || providerUsageRaw !== undefined;
         upstreamRes?.destroy();
         finish("response-aborted");
       } else {

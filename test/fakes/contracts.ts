@@ -24,10 +24,11 @@ export class InMemoryStateStore implements StateTransactionStore {
   current(sessionId: string): StateSnapshot {
     return (
       this.snapshots.get(sessionId) ?? {
-        version: 3,
+        version: 4,
         sessionId,
         revision: 0,
         surgeries: [],
+        bootstrapBranches: [],
         receiptsByOperationId: {},
       }
     );
@@ -51,4 +52,3 @@ export class InMemoryStateStore implements StateTransactionStore {
     return input.receipt;
   }
 }
-

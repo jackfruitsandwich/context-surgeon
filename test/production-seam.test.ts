@@ -140,10 +140,11 @@ function commit(
     committedAt,
   });
   const next: StateSnapshot = Object.freeze({
-    version: 3,
+    version: 4,
     sessionId: fixture.sessionId,
     revision: current.revision + 1,
     surgeries: Object.freeze([...current.surgeries, ...records]),
+    bootstrapBranches: current.bootstrapBranches,
     receiptsByOperationId: Object.freeze({
       ...current.receiptsByOperationId,
       [operationId]: receipt,

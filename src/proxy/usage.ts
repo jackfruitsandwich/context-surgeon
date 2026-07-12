@@ -1,6 +1,12 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 import zlib from "node:zlib";
+import {
+  CACHE_USAGE_MERGE_VERSION,
+  type FrozenJsonValue,
+  type RawProviderUsageReceipt,
+} from "../contracts/cache.js";
+import { freezeJsonValue } from "../cache/canonical.js";
 
 export type ProviderFormat =
   | "openai-responses"
@@ -14,6 +20,7 @@ export type UsageTap = {
   onEnd: () => void;
   onAborted: () => void;
   latestUsage: () => ProviderUsage | undefined;
+  latestRawUsage: () => RawProviderUsageReceipt | undefined;
 };
 
 const MAX_USAGE_BYTES = 1024 * 1024;
@@ -26,6 +33,25 @@ function getHeader(headers: IncomingHttpHeaders, name: string): string {
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function rawUsageSubtree(payload: unknown, format: ProviderFormat): unknown {
+  if (!payload || typeof payload !== "object") return undefined;
+  const record = payload as Record<string, unknown>;
+  if (format === "anthropic-messages") {
+    const message =
+      record.message && typeof record.message === "object"
+        ? (record.message as Record<string, unknown>)
+        : undefined;
+    return message?.usage ?? record.usage;
+  }
+  const response =
+    format === "openai-responses" &&
+    record.response &&
+    typeof record.response === "object"
+      ? (record.response as Record<string, unknown>)
+      : record;
+  return response.usage;
 }
 
 function usageRecord(payload: unknown, format: ProviderFormat): ProviderUsage | undefined {
@@ -44,11 +70,37 @@ function usageRecord(payload: unknown, format: ProviderFormat): ProviderUsage | 
           ? (record.usage as Record<string, unknown>)
           : undefined;
     if (!usage) return undefined;
+    const creation =
+      usage.cache_creation && typeof usage.cache_creation === "object"
+        ? (usage.cache_creation as Record<string, unknown>)
+        : undefined;
     return Object.freeze({
-      uncached_input_tokens: numberOrNull(usage.input_tokens),
-      cache_creation_input_tokens: numberOrNull(usage.cache_creation_input_tokens),
-      cache_read_input_tokens: numberOrNull(usage.cache_read_input_tokens),
-      output_tokens: numberOrNull(usage.output_tokens),
+      ...(Object.hasOwn(usage, "input_tokens")
+        ? { uncached_input_tokens: numberOrNull(usage.input_tokens) }
+        : {}),
+      ...(Object.hasOwn(usage, "cache_creation_input_tokens")
+        ? { cache_creation_input_tokens: numberOrNull(usage.cache_creation_input_tokens) }
+        : {}),
+      ...(Object.hasOwn(usage, "cache_read_input_tokens")
+        ? { cache_read_input_tokens: numberOrNull(usage.cache_read_input_tokens) }
+        : {}),
+      ...(creation && "ephemeral_5m_input_tokens" in creation
+        ? {
+            cache_creation_5m_input_tokens: numberOrNull(
+              creation.ephemeral_5m_input_tokens
+            ),
+          }
+        : {}),
+      ...(creation && "ephemeral_1h_input_tokens" in creation
+        ? {
+            cache_creation_1h_input_tokens: numberOrNull(
+              creation.ephemeral_1h_input_tokens
+            ),
+          }
+        : {}),
+      ...(Object.hasOwn(usage, "output_tokens")
+        ? { output_tokens: numberOrNull(usage.output_tokens) }
+        : {}),
     });
   }
 
@@ -65,10 +117,28 @@ function usageRecord(payload: unknown, format: ProviderFormat): ProviderUsage | 
   if (!usage) return undefined;
 
   if (format === "openai-chat-completions") {
+    const details =
+      usage.prompt_tokens_details && typeof usage.prompt_tokens_details === "object"
+        ? (usage.prompt_tokens_details as Record<string, unknown>)
+        : undefined;
     return Object.freeze({
-      prompt_tokens: numberOrNull(usage.prompt_tokens),
-      completion_tokens: numberOrNull(usage.completion_tokens),
-      total_tokens: numberOrNull(usage.total_tokens),
+      ...(Object.hasOwn(usage, "prompt_tokens")
+        ? { prompt_tokens: numberOrNull(usage.prompt_tokens) }
+        : {}),
+      ...(Object.hasOwn(usage, "completion_tokens")
+        ? { completion_tokens: numberOrNull(usage.completion_tokens) }
+        : {}),
+      ...(Object.hasOwn(usage, "total_tokens")
+        ? { total_tokens: numberOrNull(usage.total_tokens) }
+        : {}),
+      ...(details && "cached_tokens" in details
+        ? { cached_input_tokens: numberOrNull(details.cached_tokens) }
+        : {}),
+      ...(details && "cache_write_tokens" in details
+        ? { cache_write_input_tokens: numberOrNull(details.cache_write_tokens) }
+        : Object.hasOwn(usage, "cache_write_tokens")
+          ? { cache_write_input_tokens: numberOrNull(usage.cache_write_tokens) }
+        : {}),
     });
   }
 
@@ -77,10 +147,23 @@ function usageRecord(payload: unknown, format: ProviderFormat): ProviderUsage | 
       ? (usage.input_tokens_details as Record<string, unknown>)
       : undefined;
   return Object.freeze({
-    input_tokens: numberOrNull(usage.input_tokens),
-    cached_input_tokens: numberOrNull(details?.cached_tokens),
-    output_tokens: numberOrNull(usage.output_tokens),
-    total_tokens: numberOrNull(usage.total_tokens),
+    ...(Object.hasOwn(usage, "input_tokens")
+      ? { input_tokens: numberOrNull(usage.input_tokens) }
+      : {}),
+    ...(details && Object.hasOwn(details, "cached_tokens")
+      ? { cached_input_tokens: numberOrNull(details.cached_tokens) }
+      : {}),
+    ...(details && "cache_write_tokens" in details
+      ? { cache_write_input_tokens: numberOrNull(details.cache_write_tokens) }
+      : Object.hasOwn(usage, "cache_write_tokens")
+        ? { cache_write_input_tokens: numberOrNull(usage.cache_write_tokens) }
+      : {}),
+    ...(Object.hasOwn(usage, "output_tokens")
+      ? { output_tokens: numberOrNull(usage.output_tokens) }
+      : {}),
+    ...(Object.hasOwn(usage, "total_tokens")
+      ? { total_tokens: numberOrNull(usage.total_tokens) }
+      : {}),
   });
 }
 
@@ -102,18 +185,48 @@ function createCollector(
   onUsage?: (usage: ProviderUsage) => void
 ) {
   let latest: ProviderUsage | undefined;
+  const rawEvents: FrozenJsonValue[] = [];
+  let rawState: RawProviderUsageReceipt["state"] = "partial";
+
+  const mergeRaw = (left: FrozenJsonValue, right: FrozenJsonValue): FrozenJsonValue => {
+    if (
+      left !== null &&
+      right !== null &&
+      typeof left === "object" &&
+      typeof right === "object" &&
+      !Array.isArray(left) &&
+      !Array.isArray(right)
+    ) {
+      const merged: Record<string, FrozenJsonValue> = {
+        ...(left as { readonly [key: string]: FrozenJsonValue }),
+      };
+      for (const [key, value] of Object.entries(right)) {
+        merged[key] = key in merged ? mergeRaw(merged[key], value) : value;
+      }
+      return freezeJsonValue(merged);
+    }
+    return right;
+  };
+
+  const rawReceipt = (): RawProviderUsageReceipt | undefined => {
+    if (rawEvents.length === 0) return undefined;
+    const merged = rawEvents.slice(1).reduce(mergeRaw, rawEvents[0]);
+    return Object.freeze({
+      mergeVersion: CACHE_USAGE_MERGE_VERSION,
+      state: rawState,
+      events: Object.freeze(
+        rawEvents.map((raw, sequence) => Object.freeze({ sequence, raw }))
+      ),
+      merged,
+    });
+  };
   return {
     accept(payload: unknown) {
+      const raw = rawUsageSubtree(payload, format);
+      if (raw !== undefined) rawEvents.push(freezeJsonValue(raw));
       const usage = usageRecord(payload, format);
       if (!usage) return;
-      latest = Object.freeze(
-        Object.fromEntries(
-          Object.entries(usage).map(([key, value]) => [
-            key,
-            value === null ? (latest?.[key] ?? null) : value,
-          ])
-        )
-      );
+      latest = Object.freeze({ ...latest, ...usage });
       onUsage?.(latest);
       const prompt = promptTokens(format, latest);
       if (prompt !== null) onPromptTokens?.(prompt);
@@ -121,6 +234,10 @@ function createCollector(
     latestUsage() {
       return latest;
     },
+    finalize(state: RawProviderUsageReceipt["state"]) {
+      rawState = state;
+    },
+    latestRawUsage: rawReceipt,
   };
 }
 
@@ -189,13 +306,16 @@ function createSseTap(
     },
     onEnd() {
       finish(true);
+      collector.finalize("complete");
     },
     onAborted() {
       // Preserve already complete events. A final parse succeeds only if the
       // unterminated event happened to be complete before the abort.
       finish(true);
+      collector.finalize("partial");
     },
     latestUsage: collector.latestUsage,
+    latestRawUsage: collector.latestRawUsage,
   };
 }
 
@@ -210,7 +330,7 @@ function createJsonTap(
   let bytes = 0;
   let disabled = false;
 
-  function finish(): void {
+  function finish(state: RawProviderUsageReceipt["state"]): void {
     if (disabled) return;
     body += decoder.end();
     try {
@@ -218,6 +338,7 @@ function createJsonTap(
     } catch {
       // Missing or malformed usage is represented by no usage on the attempt.
     }
+    collector.finalize(state);
     body = "";
   }
 
@@ -232,9 +353,10 @@ function createJsonTap(
       }
       body += decoder.write(chunk);
     },
-    onEnd: finish,
-    onAborted: finish,
+    onEnd: () => finish("complete"),
+    onAborted: () => finish("partial"),
     latestUsage: collector.latestUsage,
+    latestRawUsage: collector.latestRawUsage,
   };
 }
 
@@ -283,6 +405,7 @@ function compressedTap(inner: UsageTap, encoding: string): UsageTap {
       finish(true);
     },
     latestUsage: inner.latestUsage,
+    latestRawUsage: inner.latestRawUsage,
   };
 }
 

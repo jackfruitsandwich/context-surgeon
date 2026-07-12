@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
+  BootstrapBranchState,
   IdentityConfidence,
   IdentityResolver,
   Occurrence,
@@ -165,6 +166,8 @@ type BranchHistory = {
   branchId: string;
   history: readonly string[];
   observations: readonly (readonly string[])[];
+  parentBranchId?: string;
+  forkPoint?: number;
 };
 
 export type HistoryObservation = Readonly<{
@@ -182,6 +185,17 @@ function commonPrefixLength(a: readonly string[], b: readonly string[]): number 
   return length;
 }
 
+function suffixPrefixLength(previous: readonly string[], next: readonly string[]): number {
+  const maximum = Math.min(previous.length, next.length);
+  for (let length = maximum; length > 0; length -= 1) {
+    const offset = previous.length - length;
+    if (next.slice(0, length).every((part, index) => part === previous[offset + index])) {
+      return length;
+    }
+  }
+  return 0;
+}
+
 /**
  * Tracks only pristine evidence. It never chooses by recency, size, or a
  * previously selected branch. Earlier edits and non-unique extensions are
@@ -190,7 +204,28 @@ function commonPrefixLength(a: readonly string[], b: readonly string[]): number 
 export class PristineHistoryTracker {
   private branches = new Map<string, BranchHistory>();
 
-  constructor(readonly sessionId: string) {}
+  constructor(
+    readonly sessionId: string,
+    restored: readonly BootstrapBranchState[] = []
+  ) {
+    this.restore(restored);
+  }
+
+  restore(restored: readonly BootstrapBranchState[]): void {
+    for (const record of restored) {
+      if (this.branches.has(record.branchId)) continue;
+      this.branches.set(record.branchId, {
+        conversationId: record.conversationId,
+        branchId: record.branchId,
+        history: Object.freeze([...record.history]),
+        observations: Object.freeze(
+          record.observations.map((entry) => Object.freeze([...entry]))
+        ),
+        ...(record.parentBranchId ? { parentBranchId: record.parentBranchId } : {}),
+        ...(record.forkPoint !== undefined ? { forkPoint: record.forkPoint } : {}),
+      });
+    }
+  }
 
   observe(
     pristineItemHashes: readonly string[],
@@ -209,7 +244,7 @@ export class PristineHistoryTracker {
           observation.length === history.length && isPrefix(observation, history)
       )
     );
-    if (exact.length === 1) return this.result(exact[0], confidence);
+    if (exact.length === 1) return this.result(exact[0], confidence, "stable");
     if (exact.length > 1) {
       return this.ambiguous("historical request is owned by multiple branches");
     }
@@ -221,7 +256,7 @@ export class PristineHistoryTracker {
       const branch = extensions[0];
       branch.history = history;
       branch.observations = Object.freeze([...branch.observations, history]);
-      return this.result(branch, confidence);
+      return this.result(branch, confidence, "extended");
     }
     if (extensions.length > 1) {
       return this.ambiguous("history is an equal extension of multiple branches");
@@ -232,6 +267,21 @@ export class PristineHistoryTracker {
     );
     if (containedBy.length > 0) {
       return this.ambiguous("request is an earlier history, not a unique extension");
+    }
+
+    const trimmed = branches
+      .map((branch) => ({ branch, overlap: suffixPrefixLength(branch.history, history) }))
+      .filter(({ overlap }) => overlap > 0);
+    if (trimmed.length > 0) {
+      const maximum = Math.max(...trimmed.map(({ overlap }) => overlap));
+      const closest = trimmed.filter(({ overlap }) => overlap === maximum);
+      if (closest.length === 1) {
+        const branch = closest[0].branch;
+        branch.history = history;
+        branch.observations = Object.freeze([...branch.observations, history]);
+        return this.result(branch, confidence, "trimmed");
+      }
+      return this.ambiguous("trimmed history has non-unique lineage");
     }
 
     const related = branches
@@ -248,9 +298,11 @@ export class PristineHistoryTracker {
         branchId: randomUUID(),
         history,
         observations: Object.freeze([history]),
+        parentBranchId: ancestor.branchId,
+        forkPoint: maxCommon,
       };
       this.branches.set(fork.branchId, fork);
-      return this.result(fork, confidence);
+      return this.result(fork, confidence, "forked");
     }
     return this.ambiguous("request has non-unique lineage across equally close branches");
   }
@@ -273,13 +325,14 @@ export class PristineHistoryTracker {
       observations: Object.freeze([history]),
     };
     this.branches.set(branch.branchId, branch);
-    return this.result(branch, confidence);
+    return this.result(branch, confidence, "created");
   }
 
   private identity(
     branch: BranchHistory,
     confidence: IdentityConfidence,
-    reason?: string
+    reason?: string,
+    historyTransition?: ResolvedIdentity["historyTransition"]
   ): ResolvedIdentity {
     return Object.freeze({
       sessionId: this.sessionId,
@@ -288,15 +341,19 @@ export class PristineHistoryTracker {
       revision: 0,
       confidence,
       ...(reason ? { reason } : {}),
+      ...(branch.parentBranchId ? { parentBranchId: branch.parentBranchId } : {}),
+      ...(branch.forkPoint !== undefined ? { forkPoint: branch.forkPoint } : {}),
+      ...(historyTransition ? { historyTransition } : {}),
     });
   }
 
   private result(
     branch: BranchHistory,
-    confidence: Exclude<IdentityConfidence, "ambiguous">
+    confidence: Exclude<IdentityConfidence, "ambiguous">,
+    historyTransition: NonNullable<ResolvedIdentity["historyTransition"]>
   ): HistoryObservation {
     return Object.freeze({
-      identity: this.identity(branch, confidence),
+      identity: this.identity(branch, confidence, undefined, historyTransition),
       pristineItemHashes: branch.history,
     });
   }

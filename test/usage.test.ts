@@ -84,7 +84,6 @@ describe("createUsageTap", () => {
     expect(usages).toHaveLength(1);
     expect(usages[0]).toEqual({
       input_tokens: 88,
-      cached_input_tokens: null,
       output_tokens: 5,
       total_tokens: 93,
     });
@@ -156,5 +155,102 @@ describe("createUsageTap", () => {
     );
     tap?.onAborted();
     expect(tap?.latestUsage()?.input_tokens).toBe(12);
+    expect(tap?.latestRawUsage()).toMatchObject({
+      mergeVersion: "provider-usage-v1",
+      state: "partial",
+      merged: { input_tokens: 12 },
+    });
+  });
+
+  it("retains GPT-5.6 cache writes and missing, null, and zero as distinct raw values", () => {
+    const tap = createUsageTap(
+      "openai-responses",
+      { "content-type": "text/event-stream" },
+      undefined,
+      () => undefined
+    );
+    tap?.onChunk(Buffer.from(
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":null}}}}\n\n',
+      "utf8"
+    ));
+    tap?.onEnd();
+    expect(tap?.latestUsage()).toMatchObject({
+      input_tokens: 120,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: null,
+    });
+    const raw = tap?.latestRawUsage();
+    expect(raw).toMatchObject({
+      mergeVersion: "provider-usage-v1",
+      state: "complete",
+      events: [{
+        sequence: 0,
+        raw: {
+          input_tokens: 120,
+          input_tokens_details: {
+            cached_tokens: 0,
+            cache_write_tokens: null,
+          },
+        },
+      }],
+    });
+    expect("output_tokens" in (raw?.merged as Record<string, unknown>)).toBe(false);
+  });
+
+  it("merges streaming usage recursively with later explicit null winning over prior values", () => {
+    const tap = createUsageTap(
+      "openai-responses",
+      { "content-type": "text/event-stream" },
+      undefined,
+      () => undefined
+    );
+    tap?.onChunk(Buffer.from(
+      'data: {"response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":8,"cache_write_tokens":12}}}}\n\n' +
+      'data: {"response":{"usage":{"output_tokens":3,"input_tokens_details":{"cache_write_tokens":null}}}}\n\n',
+      "utf8"
+    ));
+    tap?.onAborted();
+    expect(tap?.latestRawUsage()).toMatchObject({
+      state: "partial",
+      merged: {
+        input_tokens: 100,
+        output_tokens: 3,
+        input_tokens_details: {
+          cached_tokens: 8,
+          cache_write_tokens: null,
+        },
+      },
+    });
+    expect(tap?.latestRawUsage()?.events).toHaveLength(2);
+    expect(tap?.latestUsage()?.cache_write_input_tokens).toBeNull();
+  });
+
+  it("retains Anthropic 5m and 1h creation splits", () => {
+    const tap = createUsageTap(
+      "anthropic-messages",
+      { "content-type": "application/json" },
+      undefined,
+      () => undefined
+    );
+    tap?.onChunk(Buffer.from(JSON.stringify({ usage: {
+      input_tokens: 2,
+      cache_creation_input_tokens: 11,
+      cache_read_input_tokens: 7,
+      cache_creation: {
+        ephemeral_5m_input_tokens: 5,
+        ephemeral_1h_input_tokens: 6,
+      },
+    }})));
+    tap?.onEnd();
+    expect(tap?.latestUsage()).toMatchObject({
+      cache_creation_5m_input_tokens: 5,
+      cache_creation_1h_input_tokens: 6,
+    });
+    expect(tap?.latestRawUsage()?.merged).toMatchObject({
+      cache_creation: {
+        ephemeral_5m_input_tokens: 5,
+        ephemeral_1h_input_tokens: 6,
+      },
+    });
   });
 });

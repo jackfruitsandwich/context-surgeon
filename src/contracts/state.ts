@@ -13,6 +13,9 @@ export type ResolvedIdentity = Readonly<{
   revision: number;
   confidence: IdentityConfidence;
   reason?: string;
+  parentBranchId?: string;
+  forkPoint?: number;
+  historyTransition?: "created" | "stable" | "extended" | "trimmed" | "forked";
 }>;
 
 export type OccurrenceKind =
@@ -65,14 +68,49 @@ export type StateReceipt = Readonly<{
   committedRevision: number;
   surgeryIds: readonly string[];
   operationResults: readonly OperationResult[];
+  explanationCodes?: readonly string[];
+  bootstrapTransition?: BootstrapTransitionReceipt;
   committedAt: string;
 }>;
 
+export type BootstrapDecision = "pending" | "inject" | "preserve";
+
+export type BootstrapAnchor = Readonly<{
+  occurrenceId: string;
+  providerPath: readonly (string | number)[];
+  sourceHash: string;
+}>;
+
+export type BootstrapBranchState = Readonly<{
+  conversationId: string;
+  branchId: string;
+  parentBranchId?: string;
+  forkPoint?: number;
+  history: readonly string[];
+  observations: readonly (readonly string[])[];
+  decision: BootstrapDecision;
+  status: "awaiting-anchor" | "anchored" | "stopped";
+  anchor?: BootstrapAnchor;
+  reanchorCount: 0 | 1;
+  inheritedFromBranchId?: string;
+}>;
+
+export type BootstrapTransitionReceipt = Readonly<{
+  transitionId: string;
+  branchId: string;
+  explanationCodes: readonly string[];
+  previousDecision?: BootstrapDecision;
+  decision: BootstrapDecision;
+  previousAnchor?: BootstrapAnchor;
+  anchor?: BootstrapAnchor;
+}>;
+
 export type StateSnapshot = Readonly<{
-  version: 3;
+  version: 4;
   sessionId: string;
   revision: number;
   surgeries: readonly SurgeryRecord[];
+  bootstrapBranches: readonly BootstrapBranchState[];
   receiptsByOperationId: Readonly<Record<string, StateReceipt>>;
 }>;
 
@@ -110,4 +148,3 @@ export interface StateTransactionStore extends StateSnapshotReader {
     receipt: StateReceipt;
   }): StateReceipt;
 }
-

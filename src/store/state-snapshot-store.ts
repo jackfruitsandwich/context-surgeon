@@ -16,6 +16,8 @@ import {
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
+  BootstrapAnchor,
+  BootstrapBranchState,
   StateReceipt,
   StateSnapshot,
   StateTransactionStore,
@@ -52,10 +54,11 @@ export class StaleRevisionError extends Error {
 
 function emptySnapshot(sessionId: string): StateSnapshot {
   return Object.freeze({
-    version: 3 as const,
+    version: 4 as const,
     sessionId,
     revision: 0,
     surgeries: Object.freeze([]),
+    bootstrapBranches: Object.freeze([]),
     receiptsByOperationId: Object.freeze({}),
   });
 }
@@ -82,11 +85,56 @@ function isAction(value: unknown): value is SurgeryAction {
   );
 }
 
+function isAnchor(value: unknown): value is BootstrapAnchor {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["occurrenceId", "providerPath", "sourceHash"]) &&
+    typeof value.occurrenceId === "string" &&
+    Array.isArray(value.providerPath) &&
+    value.providerPath.every(
+      (part) => typeof part === "string" || (Number.isInteger(part) && (part as number) >= 0)
+    ) &&
+    typeof value.sourceHash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.sourceHash)
+  );
+}
+
+function validateBootstrapBranch(value: unknown): value is BootstrapBranchState {
+  if (!isRecord(value)) return false;
+  if (!onlyKeys(value, [
+    "conversationId", "branchId", "parentBranchId", "forkPoint", "history",
+    "observations", "decision", "status", "anchor", "reanchorCount",
+    "inheritedFromBranchId",
+  ])) return false;
+  return (
+    typeof value.conversationId === "string" &&
+    typeof value.branchId === "string" &&
+    (value.parentBranchId === undefined || typeof value.parentBranchId === "string") &&
+    (value.forkPoint === undefined || (Number.isInteger(value.forkPoint) && (value.forkPoint as number) >= 0)) &&
+    Array.isArray(value.history) &&
+    value.history.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)) &&
+    Array.isArray(value.observations) &&
+    value.observations.every(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
+    ) &&
+    ["pending", "inject", "preserve"].includes(String(value.decision)) &&
+    ["awaiting-anchor", "anchored", "stopped"].includes(String(value.status)) &&
+    (value.anchor === undefined || isAnchor(value.anchor)) &&
+    (value.reanchorCount === 0 || value.reanchorCount === 1) &&
+    (value.inheritedFromBranchId === undefined || typeof value.inheritedFromBranchId === "string") &&
+    (value.status === "anchored" ? isAnchor(value.anchor) : true) &&
+    (value.status === "awaiting-anchor" ? value.decision === "pending" : true)
+  );
+}
+
 function validateReceipt(value: unknown, operationId: string, sessionId: string): value is StateReceipt {
   if (!isRecord(value)) return false;
   if (!onlyKeys(value, [
     "receiptId", "operationId", "sessionId", "branchId", "previousRevision",
-    "committedRevision", "surgeryIds", "operationResults", "committedAt",
+    "committedRevision", "surgeryIds", "operationResults", "explanationCodes",
+    "bootstrapTransition", "committedAt",
   ])) return false;
   return (
     typeof value.receiptId === "string" &&
@@ -100,23 +148,58 @@ function validateReceipt(value: unknown, operationId: string, sessionId: string)
     Array.isArray(value.operationResults) &&
     value.operationResults.every((result) =>
       isRecord(result) &&
-      onlyKeys(result, ["surgeryId", "occurrenceId", "expectedSourceHash", "outcome", "outputHash", "reason"]) &&
+      onlyKeys(result, [
+        "surgeryId", "occurrenceId", "expectedSourceHash", "outcome", "outputHash",
+        "reason", "attribution", "sharedProviderPath",
+      ]) &&
       typeof result.surgeryId === "string" &&
       typeof result.occurrenceId === "string" &&
       typeof result.expectedSourceHash === "string" &&
       ["committed", "stale"].includes(String(result.outcome)) &&
       (result.outputHash === undefined || typeof result.outputHash === "string") &&
-      (result.reason === undefined || typeof result.reason === "string")
+      (result.reason === undefined || typeof result.reason === "string") &&
+      (result.attribution === undefined || result.attribution === "user-surgery" || result.attribution === "bootstrap-prefix") &&
+      (result.sharedProviderPath === undefined || typeof result.sharedProviderPath === "boolean")
     ) &&
+    (value.explanationCodes === undefined ||
+      (Array.isArray(value.explanationCodes) && value.explanationCodes.every((code) => typeof code === "string"))) &&
+    (value.bootstrapTransition === undefined || (
+      isRecord(value.bootstrapTransition) &&
+      onlyKeys(value.bootstrapTransition, [
+        "transitionId", "branchId", "explanationCodes", "previousDecision",
+        "decision", "previousAnchor", "anchor",
+      ]) &&
+      typeof value.bootstrapTransition.transitionId === "string" &&
+      typeof value.bootstrapTransition.branchId === "string" &&
+      Array.isArray(value.bootstrapTransition.explanationCodes) &&
+      value.bootstrapTransition.explanationCodes.every((code) => typeof code === "string") &&
+      (value.bootstrapTransition.previousDecision === undefined || ["pending", "inject", "preserve"].includes(String(value.bootstrapTransition.previousDecision))) &&
+      ["pending", "inject", "preserve"].includes(String(value.bootstrapTransition.decision)) &&
+      (value.bootstrapTransition.previousAnchor === undefined || isAnchor(value.bootstrapTransition.previousAnchor)) &&
+      (value.bootstrapTransition.anchor === undefined || isAnchor(value.bootstrapTransition.anchor))
+    )) &&
     typeof value.committedAt === "string"
   );
 }
 
 export function validateStateSnapshot(value: unknown, expectedSessionId?: string): StateSnapshot {
-  if (!isRecord(value) || value.version !== 3) {
+  if (isRecord(value) && value.version === 3) {
+    if (!onlyKeys(value, ["version", "sessionId", "revision", "surgeries", "receiptsByOperationId"])) {
+      throw new Error("State snapshot v3 contains unsupported fields");
+    }
+    value = {
+      ...value,
+      version: 4,
+      bootstrapBranches: [],
+    };
+  }
+  if (!isRecord(value) || value.version !== 4) {
     throw new Error("State snapshot has an unsupported or missing version");
   }
-  if (!onlyKeys(value, ["version", "sessionId", "revision", "surgeries", "receiptsByOperationId"])) {
+  if (!onlyKeys(value, [
+    "version", "sessionId", "revision", "surgeries", "bootstrapBranches",
+    "receiptsByOperationId",
+  ])) {
     throw new Error("State snapshot contains unsupported fields");
   }
   if (typeof value.sessionId !== "string" || !value.sessionId) {
@@ -155,6 +238,16 @@ export function validateStateSnapshot(value: unknown, expectedSessionId?: string
     }
     surgeryIds.add(raw.surgeryId);
   }
+  if (!Array.isArray(value.bootstrapBranches)) {
+    throw new Error("State bootstrapBranches must be an array");
+  }
+  const branchIds = new Set<string>();
+  for (const branch of value.bootstrapBranches) {
+    if (!validateBootstrapBranch(branch) || branchIds.has(branch.branchId)) {
+      throw new Error("Invalid bootstrap branch state");
+    }
+    branchIds.add(branch.branchId);
+  }
   if (!isRecord(value.receiptsByOperationId)) {
     throw new Error("State receiptsByOperationId must be an object");
   }
@@ -179,6 +272,33 @@ function writeWholeFile(fd: number, payload: string): void {
   writeFileSync(fd, payload, { encoding: "utf8" });
 }
 
+function persistSchemaMigration(path: string, snapshot: StateSnapshot): void {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const tempPath = `${path}.migrate.${randomUUID()}`;
+  let fd: number | null = null;
+  let renamed = false;
+  try {
+    fd = openSync(
+      tempPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600
+    );
+    writeWholeFile(fd, `${JSON.stringify(snapshot)}\n`);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tempPath, path);
+    renamed = true;
+    fsyncDirectory(directory);
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (!renamed) {
+      try { unlinkSync(tempPath); } catch {}
+    }
+  }
+}
+
 export type SnapshotStoreInspection = Readonly<{
   statePath: string;
   exists: boolean;
@@ -189,7 +309,7 @@ export type SnapshotStoreInspection = Readonly<{
   quarantinePath: string | null;
 }>;
 
-/** One process-local publication point backed by one whole v3 revision. */
+/** One process-local publication point backed by one whole v4 revision. */
 export class AtomicStateSnapshotStore implements StateTransactionStore {
   private snapshot: StateSnapshot;
   private recovery: RecoveryRequiredError | null = null;
@@ -315,10 +435,10 @@ export class AtomicStateSnapshotStore implements StateTransactionStore {
       if (mode !== 0o600) {
         throw new Error(`State snapshot permissions are ${mode.toString(8)}, expected 600`);
       }
-      this.snapshot = validateStateSnapshot(
-        JSON.parse(readFileSync(this.statePath, "utf8")),
-        this.sessionId
-      );
+      const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
+      const wasV3 = isRecord(parsed) && parsed.version === 3;
+      this.snapshot = validateStateSnapshot(parsed, this.sessionId);
+      if (wasV3) persistSchemaMigration(this.statePath, this.snapshot);
     } catch (error) {
       const directory = dirname(this.statePath);
       const quarantine = `${this.statePath}.quarantine.${Date.now()}.${randomUUID()}`;
