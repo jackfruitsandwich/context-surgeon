@@ -12,6 +12,8 @@ import type {
 import { getAtPath, sha256Value } from "../providers/shared.js";
 
 const EMPTY_HASH = "0".repeat(64);
+const MAX_BOOTSTRAP_OBSERVATIONS = 8;
+const MAX_BOOTSTRAP_RECEIPTS = 64;
 
 function anchorFor(
   occurrence: ProviderProjection["occurrences"][number]
@@ -104,7 +106,9 @@ function branchState(input: {
       : {}),
     history: Object.freeze([...input.history]),
     observations: Object.freeze(
-      (input.observations ?? [input.history]).map((entry) => Object.freeze([...entry]))
+      (input.observations ?? [input.history])
+        .slice(-MAX_BOOTSTRAP_OBSERVATIONS)
+        .map((entry) => Object.freeze([...entry]))
     ),
     decision: input.decision,
     status: input.status,
@@ -131,7 +135,38 @@ function appendObservation(
   return Object.freeze([
     ...branch.observations,
     Object.freeze([...history]),
-  ]);
+  ].slice(-MAX_BOOTSTRAP_OBSERVATIONS));
+}
+
+function boundedReceipts(
+  current: Readonly<Record<string, StateReceipt>>,
+  operationId: string,
+  receipt: StateReceipt
+): Readonly<Record<string, StateReceipt>> {
+  const entries = Object.entries(current);
+  const bootstrap = [
+    ...entries.filter(([, candidate]) => candidate.bootstrapTransition !== undefined),
+    [operationId, receipt] as const,
+  ];
+  const keepBootstrap = new Set<string>();
+  const representedBranches = new Set<string>();
+  for (const [id, candidate] of [...bootstrap].reverse()) {
+    const branchId = candidate.bootstrapTransition?.branchId;
+    if (!branchId || representedBranches.has(branchId)) continue;
+    representedBranches.add(branchId);
+    keepBootstrap.add(id);
+  }
+  const target = Math.max(MAX_BOOTSTRAP_RECEIPTS, keepBootstrap.size);
+  for (const [id] of [...bootstrap].reverse()) {
+    if (keepBootstrap.size >= target) break;
+    keepBootstrap.add(id);
+  }
+  return Object.freeze(Object.fromEntries([
+    ...entries.filter(([id, candidate]) =>
+      candidate.bootstrapTransition === undefined || keepBootstrap.has(id)
+    ),
+    [operationId, receipt],
+  ]));
 }
 
 function replaceBranch(
@@ -358,10 +393,11 @@ export function reconcileBootstrapState(input: {
     revision: current.revision + 1,
     surgeries: current.surgeries,
     bootstrapBranches: replaceBranch(current, nextBranch),
-    receiptsByOperationId: Object.freeze({
-      ...current.receiptsByOperationId,
-      [operationId]: receipt,
-    }),
+    receiptsByOperationId: boundedReceipts(
+      current.receiptsByOperationId,
+      operationId,
+      receipt
+    ),
   });
   input.store.commit({
     expectedRevision: current.revision,

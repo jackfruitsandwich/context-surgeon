@@ -132,6 +132,19 @@ function requestedTtl(value: unknown): string | undefined {
   return typeof value.cache_control.ttl === "string" ? value.cache_control.ttl : undefined;
 }
 
+function canonicalPrefix(
+  segments: readonly CompiledSentSegment[],
+  afterSegment: number
+) {
+  return segments.slice(0, afterSegment + 1).map((item) => ({
+    ordinal: item.ordinal,
+    providerPath: item.providerPath,
+    kind: item.kind,
+    role: item.role ?? null,
+    contentDigest: item.contentDigest,
+  }));
+}
+
 function structuralSegments(
   provider: ProviderKind,
   body: JsonRecord,
@@ -171,13 +184,7 @@ function breakpoints(
   const output: CompiledCacheBreakpoint[] = [];
   raw.forEach((segment, afterSegment) => {
     if (!hasCacheControl(segment.value)) return;
-    const prefix = segments.slice(0, afterSegment + 1).map((item) => ({
-      ordinal: item.ordinal,
-      providerPath: item.providerPath,
-      kind: item.kind,
-      role: item.role ?? null,
-      contentDigest: item.contentDigest,
-    }));
+    const prefix = canonicalPrefix(segments, afterSegment);
     const ttl = requestedTtl(segment.value);
     output.push(Object.freeze({
       source: "context-surgeon" as const,
@@ -186,7 +193,7 @@ function breakpoints(
       sentPrefixDigest: hmacSentDigest(
         secret,
         prefix,
-        "context-surgeon:cache-prefix:v1"
+        "context-surgeon:cache-prefix:v2"
       ),
       canonicalPrefixBytes: segments
         .slice(0, afterSegment + 1)
@@ -203,8 +210,8 @@ function breakpoints(
       afterSegment,
       sentPrefixDigest: hmacSentDigest(
         secret,
-        segments.map((item) => item.contentDigest),
-        "context-surgeon:cache-prefix:v1"
+        canonicalPrefix(segments, afterSegment),
+        "context-surgeon:cache-prefix:v2"
       ),
       canonicalPrefixBytes: segments.reduce((sum, item) => sum + item.canonicalBytes, 0),
       requestedTtl: requestedTtl({ cache_control: body.cache_control }),
@@ -258,6 +265,8 @@ function mapWithoutPreview(input: {
   exactBodySha256: string;
   occurrences: readonly Occurrence[];
   secret: Uint8Array;
+  telemetryDurability: "durable" | "ephemeral";
+  additionalExplanationCodes: readonly string[];
 }): CompiledSentMap {
   const extracted = structuralSegments(
     input.provider,
@@ -294,6 +303,10 @@ function mapWithoutPreview(input: {
       "compiled-sent-map-exact-final-body",
       "provider-private-rendering-not-claimed",
       "provider-cache-residency-not-claimed",
+      ...(input.telemetryDurability === "ephemeral"
+        ? ["ephemeral-telemetry", "cache-digests-not-comparable-after-restart"]
+        : ["durable-cache-telemetry-key"]),
+      ...input.additionalExplanationCodes,
     ]),
   });
 }
@@ -305,6 +318,8 @@ export function compileSentMap(input: {
   exactBodySha256: string;
   occurrences: readonly Occurrence[];
   secret: Uint8Array;
+  telemetryDurability?: "durable" | "ephemeral";
+  additionalExplanationCodes?: readonly string[];
 }): CompiledSentMap {
   const before = mapWithoutPreview({
     provider: input.provider,
@@ -312,6 +327,8 @@ export function compileSentMap(input: {
     exactBodySha256: "received-body",
     occurrences: input.occurrences,
     secret: input.secret,
+    telemetryDurability: input.telemetryDurability ?? "durable",
+    additionalExplanationCodes: input.additionalExplanationCodes ?? [],
   });
   const after = mapWithoutPreview({
     provider: input.provider,
@@ -319,6 +336,8 @@ export function compileSentMap(input: {
     exactBodySha256: input.exactBodySha256,
     occurrences: input.occurrences,
     secret: input.secret,
+    telemetryDurability: input.telemetryDurability ?? "durable",
+    additionalExplanationCodes: input.additionalExplanationCodes ?? [],
   });
   return Object.freeze({
     ...after,

@@ -146,17 +146,25 @@ export type ImmutableRequestCompilerOptions = Readonly<{
   skillBootstrap?: string;
   skillSignature?: string;
   cacheHmacSecret?: Uint8Array;
+  cacheTelemetryDurability?: "durable" | "ephemeral";
+  cacheExplanationCodes?: readonly string[];
 }>;
 
 export class ImmutableRequestCompiler implements RequestCompiler {
   private readonly skillBootstrap: string;
   private readonly cacheHmacSecret: Uint8Array;
+  private readonly cacheTelemetryDurability: "durable" | "ephemeral";
+  private readonly cacheExplanationCodes: readonly string[];
 
   constructor(options: ImmutableRequestCompilerOptions = {}) {
     this.skillBootstrap = options.skillBootstrap?.trim() ?? "";
     this.cacheHmacSecret = new Uint8Array(
       options.cacheHmacSecret ?? randomBytes(32)
     );
+    this.cacheTelemetryDurability =
+      options.cacheTelemetryDurability ??
+      (options.cacheHmacSecret ? "durable" : "ephemeral");
+    this.cacheExplanationCodes = Object.freeze([...(options.cacheExplanationCodes ?? [])]);
   }
 
   compile(input: {
@@ -494,6 +502,8 @@ export class ImmutableRequestCompiler implements RequestCompiler {
       exactBodySha256: exactBody.sha256,
       occurrences: before.occurrences,
       secret: this.cacheHmacSecret,
+      telemetryDurability: this.cacheTelemetryDurability,
+      additionalExplanationCodes: this.cacheExplanationCodes,
     });
     const operationResults = freezeResults(results);
     const compiled: CompiledRequest = Object.freeze({

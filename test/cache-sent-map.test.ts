@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalizeSentValue, freezeJsonValue, hmacSentDigest } from "../src/cache/canonical.js";
 import { loadOrCreateCacheHmacSecret } from "../src/cache/key-store.js";
+import { compileSentMap } from "../src/cache/sent-map.js";
 import { ImmutableRequestCompiler, receiveRequest } from "../src/compiler/index.js";
 import type { ResolvedIdentity, StateSnapshot } from "../src/contracts/state.js";
 import { providerCodec } from "../src/providers/index.js";
@@ -76,6 +77,36 @@ describe("json-insertion-v1 canonicalization", () => {
 });
 
 describe("compiled provider sent map", () => {
+	it("uses one canonical prefix identity for explicit and automatic markers", () => {
+		const finalBody = {
+			model: "claude-fable-5",
+			cache_control: { type: "ephemeral" },
+			messages: [{ role: "user", content: [{ type: "text", text: "same", cache_control: { type: "ephemeral" } }] }],
+		};
+		const map = compileSentMap({
+			provider: "anthropic-messages",
+			receivedBody: finalBody,
+			finalBody,
+			exactBodySha256: "exact",
+			occurrences: [],
+			secret,
+		});
+		expect(map.breakpoints).toHaveLength(2);
+		expect(map.breakpoints[0].sentPrefixDigest).toBe(map.breakpoints[1].sentPrefixDigest);
+	});
+
+	it("labels transient legacy telemetry as non-comparable after restart", () => {
+		const request = received("openai-responses", { model: "gpt-5.6", input: [] });
+		const output = new ImmutableRequestCompiler().compile({
+			received: request,
+			identity,
+			codec: providerCodec("openai-responses"),
+			state: state(),
+		});
+		expect(output.compiled.sentMap.explanationCodes).toContain("ephemeral-telemetry");
+		expect(output.compiled.sentMap.explanationCodes).toContain("cache-digests-not-comparable-after-restart");
+	});
+
   it("uses Anthropic tools→system→messages order and preserves explicit breakpoints through surgery", () => {
     const value = {
       model: "claude-opus-4-8",

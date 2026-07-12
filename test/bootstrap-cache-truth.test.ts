@@ -109,6 +109,54 @@ function firstText(output: ReturnType<typeof compile>): string {
 }
 
 describe("sticky anchored bootstrap", () => {
+  it("anchors Anthropic at the first user text without changing system arrays", () => {
+    const path = directory();
+    const sessionId = hash("anthropic-bootstrap-session");
+    const store = AtomicStateSnapshotStore.inSessionDirectory(path, sessionId);
+    const tracker = new PristineHistoryTracker(sessionId);
+    const value = {
+      model: "claude-fable-5",
+      max_tokens: 16,
+      stream: true,
+      system: [{ type: "text", text: "stable system", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: [{ type: "text", text: "original", cache_control: { type: "ephemeral" } }] }],
+    };
+    const bytes = Buffer.from(JSON.stringify(value));
+    const received = receiveRequest({
+      requestId: randomUUID(),
+      route: { provider: "anthropic-messages", incomingPath: "/v1/messages", upstreamUrl: "https://provider.test/v1/messages" },
+      receivedBytes: bytes,
+    });
+    const pending: ResolvedIdentity = { sessionId: "pending", conversationId: "pending", branchId: "pending", revision: 0, confidence: "explicit" };
+    const codec = providerCodec("anthropic-messages");
+    const pristine = codec.parse(received, pending).context.items.map((item) => hash(canonicalizeItem(item)));
+    const identity = tracker.observe(pristine).identity;
+    const projection = codec.parse(received, identity);
+    const reconciliation = reconcileBootstrapState({
+      store,
+      identity,
+      projection,
+      receivedValue: received.providerValue,
+      pristineItemHashes: pristine,
+      skillSignature: signature,
+      skillBootstrap: bootstrap,
+    });
+    const output = new ImmutableRequestCompiler({ skillBootstrap: bootstrap, cacheHmacSecret: secret }).compile({
+      received,
+      identity,
+      state: reconciliation.state,
+      codec,
+    });
+    const final = JSON.parse(output.exactBody.inspectCopy().toString("utf8"));
+    expect(final.system).toEqual(value.system);
+    expect(final.messages[0].content[0]).toEqual({
+      type: "text",
+      text: `${bootstrap}\n\noriginal`,
+      cache_control: { type: "ephemeral" },
+    });
+    expect(output.compiled.sentMap.preview).toMatchObject({ firstDivergenceSegment: 1 });
+  });
+
   it("cannot be toggled by later model echo, user paste, or tool output", () => {
     const path = directory();
     const sessionId = hash("echo-session");
@@ -195,16 +243,16 @@ describe("sticky anchored bootstrap", () => {
     const store = AtomicStateSnapshotStore.inSessionDirectory(path, sessionId);
     const tracker = new PristineHistoryTracker(sessionId);
     compile({
-      value: body([user("a"), assistant("b"), user("c")]),
+      value: body([user("a"), assistant("b"), user("c"), assistant("d")]),
       tracker,
       store,
-      history: [hash("a"), hash("b"), hash("c")],
+      history: [hash("a"), hash("b"), hash("c"), hash("d")],
     });
     const trimmed = compile({
-      value: body([user("c"), assistant("d")]),
+      value: body([user("c"), assistant("d"), user("e")]),
       tracker,
       store,
-      history: [hash("c"), hash("d")],
+      history: [hash("c"), hash("d"), hash("e")],
     });
     expect(trimmed.reconciliation.explanationCodes).toContain(
       "bootstrap-anchor-reanchored-after-history-trim"
@@ -212,10 +260,10 @@ describe("sticky anchored bootstrap", () => {
     expect(firstText(trimmed)).toBe(`${bootstrap}\n\nc`);
 
     const stopped = compile({
-      value: body([user("d"), assistant("e")]),
+      value: body([user("d"), assistant("e"), user("f")]),
       tracker,
       store,
-      history: [hash("d"), hash("e")],
+      history: [hash("d"), hash("e"), hash("f")],
     });
     expect(stopped.reconciliation.explanationCodes).toContain(
       "bootstrap-anchor-loss-stopped-visible"
@@ -309,6 +357,25 @@ describe("sticky anchored bootstrap", () => {
     });
     expect(restarted.output.exactBody.inspectCopy().equals(applied.output.exactBody.inspectCopy()))
       .toBe(true);
+  });
+
+  it("bounds persisted bootstrap observations and compiler receipts", () => {
+    const path = directory();
+    const sessionId = hash("bounded-bootstrap-session");
+    const store = AtomicStateSnapshotStore.inSessionDirectory(path, sessionId);
+    const tracker = new PristineHistoryTracker(sessionId);
+    for (let index = 1; index <= 70; index += 1) {
+      compile({
+        value: body([user("root")]),
+        tracker,
+        store,
+        history: Array.from({ length: index }, (_, item) => hash(`bounded-${item}`)),
+      });
+    }
+    const snapshot = store.current(sessionId);
+    expect(snapshot.bootstrapBranches[0].observations.length).toBeLessThanOrEqual(8);
+    expect(Object.values(snapshot.receiptsByOperationId).filter((receipt) => receipt.bootstrapTransition).length)
+      .toBeLessThanOrEqual(64);
   });
 });
 

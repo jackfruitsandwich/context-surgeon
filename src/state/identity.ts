@@ -9,6 +9,7 @@ import type {
 } from "../contracts/state.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_HISTORY_OBSERVATIONS = 8;
 
 function sha256(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
@@ -196,6 +197,13 @@ function suffixPrefixLength(previous: readonly string[], next: readonly string[]
   return 0;
 }
 
+function appendObservation(
+  observations: readonly (readonly string[])[],
+  history: readonly string[]
+): readonly (readonly string[])[] {
+  return Object.freeze([...observations, history].slice(-MAX_HISTORY_OBSERVATIONS));
+}
+
 /**
  * Tracks only pristine evidence. It never chooses by recency, size, or a
  * previously selected branch. Earlier edits and non-unique extensions are
@@ -255,7 +263,7 @@ export class PristineHistoryTracker {
     if (extensions.length === 1) {
       const branch = extensions[0];
       branch.history = history;
-      branch.observations = Object.freeze([...branch.observations, history]);
+      branch.observations = appendObservation(branch.observations, history);
       return this.result(branch, confidence, "extended");
     }
     if (extensions.length > 1) {
@@ -271,14 +279,14 @@ export class PristineHistoryTracker {
 
     const trimmed = branches
       .map((branch) => ({ branch, overlap: suffixPrefixLength(branch.history, history) }))
-      .filter(({ overlap }) => overlap > 0);
+      .filter(({ overlap }) => overlap >= 2);
     if (trimmed.length > 0) {
       const maximum = Math.max(...trimmed.map(({ overlap }) => overlap));
       const closest = trimmed.filter(({ overlap }) => overlap === maximum);
       if (closest.length === 1) {
         const branch = closest[0].branch;
         branch.history = history;
-        branch.observations = Object.freeze([...branch.observations, history]);
+        branch.observations = appendObservation(branch.observations, history);
         return this.result(branch, confidence, "trimmed");
       }
       return this.ambiguous("trimmed history has non-unique lineage");

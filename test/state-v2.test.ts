@@ -160,6 +160,20 @@ describe("v2 identity", () => {
     });
   });
 
+  it("does not inherit lineage from one coincidentally matching tail item", () => {
+    const tracker = new PristineHistoryTracker(hash("session-weak-trim"));
+    const original = tracker.observe([hash("a"), hash("b"), hash("shared")]);
+    const unrelated = tracker.observe([hash("shared"), hash("new")]);
+    expect(unrelated.identity.conversationId).not.toBe(original.identity.conversationId);
+    expect(unrelated.identity.historyTransition).toBe("created");
+
+    const strong = new PristineHistoryTracker(hash("session-strong-trim"));
+    const before = strong.observe([hash("a"), hash("b"), hash("c"), hash("d")]);
+    const trimmed = strong.observe([hash("c"), hash("d"), hash("e")]);
+    expect(trimmed.identity.conversationId).toBe(before.identity.conversationId);
+    expect(trimmed.identity.historyTransition).toBe("trimmed");
+  });
+
   it("rejects duplicate ordinal aliases, including reused tool call ids", () => {
     const sessionId = hash("session");
     const branchId = randomUUID();

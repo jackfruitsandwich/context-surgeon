@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ContextObject } from "../context/types.js";
 import { canonicalizeItem } from "../context/fingerprint.js";
 import type { DirectiveStore } from "../store/directive-store.js";
@@ -77,6 +77,7 @@ export type TransformResult = Readonly<{
 const SKILL_SIGNATURE = "genuin-joging-awkwerd-febuary";
 const sessionIds = new WeakMap<HandlerConfig, string>();
 const legacyBootstrapStates = new WeakMap<HandlerConfig, StateSnapshot>();
+const legacyCacheHmacSecrets = new WeakMap<HandlerConfig, Uint8Array>();
 
 export type V2SessionSeam = Readonly<{
   sessionId: string;
@@ -111,6 +112,14 @@ function sessionIdFor(config: HandlerConfig): string {
   if (existing) return existing;
   const created = `truth-core-${randomUUID()}`;
   sessionIds.set(config, created);
+  return created;
+}
+
+function legacyCacheHmacSecret(config: HandlerConfig): Uint8Array {
+  const existing = legacyCacheHmacSecrets.get(config);
+  if (existing) return existing;
+  const created = new Uint8Array(randomBytes(32));
+  legacyCacheHmacSecrets.set(config, created);
   return created;
 }
 
@@ -414,7 +423,10 @@ export async function compileSupportedRequest(
   const compiler = new ImmutableRequestCompiler({
     skillBootstrap: config.skillMarkdown,
     skillSignature: SKILL_SIGNATURE,
-    cacheHmacSecret: seam?.cacheHmacSecret ?? config.cacheHmacSecret,
+    cacheHmacSecret: seam?.cacheHmacSecret ?? config.cacheHmacSecret ?? legacyCacheHmacSecret(config),
+    cacheTelemetryDurability:
+      seam?.cacheHmacSecret || config.cacheHmacSecret ? "durable" : "ephemeral",
+    cacheExplanationCodes: seam ? [] : ["bootstrap-decision-not-durable"],
   });
   const { compiled, exactBody } = compiler.compile({
     received,
